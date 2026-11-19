@@ -15,11 +15,31 @@ import {
   type PropulsionType,
   type ResourceType,
   type SensorTrack,
+  type SuspectedTrackKind,
+  type TrackConfidence,
   type UnitEntity,
   type UnitKind,
+  type Vec2,
   type VfxEvent,
   type WonderSlot,
 } from '@space-war/shared';
+
+export interface InternalTrackRecord {
+  trackId: string;
+  targetId: string;
+  confidence: TrackConfidence;
+  suspectedKind: SuspectedTrackKind;
+  bearingRad?: number;
+  originPos?: Vec2;
+  pos?: Vec2;
+  vel?: Vec2;
+  errorRadiusMajorAu?: number;
+  errorRadiusMinorAu?: number;
+  errorAngleRad?: number;
+  lastConfirmedOrbit?: KeplerOrbit;
+  lastObservedSec: number;
+  isJammed: boolean;
+}
 
 export interface FactionRuntimeState {
   resources: Record<ResourceType, number>;
@@ -35,6 +55,10 @@ export interface WorldState {
   units: Map<string, UnitEntity>;
   munitions: Map<string, MunitionEntity>;
   tracksByFaction: Record<FactionId, SensorTrack[]>;
+  trackMemoryByFaction: Record<FactionId, Map<string, InternalTrackRecord>>;
+  nextTrackSeqByFaction: Record<FactionId, number>;
+  sensorBlindUntilSec: Map<string, number>;
+  launchedDronesByCarrier: Map<string, number>;
   routesByFaction: Record<FactionId, LogisticsRoute[]>;
   factions: Record<FactionId, FactionRuntimeState>;
   vfxEvents: VfxEvent[];
@@ -184,6 +208,16 @@ export function createInitialWorldState(): WorldState {
       earth: [],
       mars: [],
     },
+    trackMemoryByFaction: {
+      earth: new Map(),
+      mars: new Map(),
+    },
+    nextTrackSeqByFaction: {
+      earth: 1,
+      mars: 1,
+    },
+    sensorBlindUntilSec: new Map(),
+    launchedDronesByCarrier: new Map(),
     routesByFaction: {
       earth: [],
       mars: [],
