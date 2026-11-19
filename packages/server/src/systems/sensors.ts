@@ -9,6 +9,7 @@ import {
   type FactionId,
   type KeplerOrbit,
   type MunitionEntity,
+  type OccluderBody,
   type SensorTrack,
   type SubsystemHealth,
   type SuspectedTrackKind,
@@ -16,7 +17,7 @@ import {
   type Vec2,
 } from '@space-war/shared';
 import type { TickSystemHook } from '../engine/simulationLoop.js';
-import type { InternalTrackRecord, WorldState } from '../engine/worldState.js';
+import { getWorldOccluders, type InternalTrackRecord, type WorldState } from '../engine/worldState.js';
 import { EW_CONSTANTS } from './ew.js';
 import { computeUnitIrSignature } from './thermal.js';
 
@@ -172,7 +173,9 @@ export function evaluateSensorChannels(
   target: UnitEntity | MunitionEntity | TargetSignatureView,
   world: WorldState,
   irByUnit?: ReadonlyMap<string, number>,
+  precomputedOccluders?: readonly OccluderBody[],
 ): ChannelEvaluation {
+  const occluders = precomputedOccluders ?? world.celestials;
   const view = 'suspectedKind' in target ? target : buildTargetView(target, irByUnit);
   const dx = view.pos.x - observer.pos.x;
   const dy = view.pos.y - observer.pos.y;
@@ -195,7 +198,7 @@ export function evaluateSensorChannels(
     };
   }
 
-  const occluded = isOccluded(observer.pos, view.pos, world.celestials, world.gameTimeSec);
+  const occluded = isOccluded(observer.pos, view.pos, occluders, world.gameTimeSec);
   if (occluded) {
     return {
       occluded: true,
@@ -231,7 +234,7 @@ export function evaluateSensorChannels(
     (rDistSq * solarBgNoise * SENSOR_CONSTANTS.irNorm);
 
   // 2. Passive Optical (0 inside planetary umbra, attenuated by sun flux & glare)
-  const inUmbra = isInUmbra(view.pos, world.celestials, world.gameTimeSec);
+  const inUmbra = isInUmbra(view.pos, occluders, world.gameTimeSec);
   let snrOptical = 0;
   if (!inUmbra) {
     const sunFlux = 1 / (rTargetSun * rTargetSun);
@@ -496,7 +499,9 @@ export function updateFactionSensors(
   world: WorldState,
   observerFaction: FactionId,
   irByUnit?: ReadonlyMap<string, number>,
+  precomputedOccluders?: readonly OccluderBody[],
 ): SensorTrack[] {
+  const occluders = precomputedOccluders ?? getWorldOccluders(world);
   const memory = world.trackMemoryByFaction[observerFaction];
   const observers: UnitEntity[] = [];
   for (const unit of world.units.values()) {
@@ -523,7 +528,7 @@ export function updateFactionSensors(
     const observations: PairObservation[] = [];
 
     for (const observer of observers) {
-      const ch = evaluateSensorChannels(observer, target, world, irByUnit);
+      const ch = evaluateSensorChannels(observer, target, world, irByUnit, occluders);
       if (ch.occluded) {
         continue;
       }
@@ -666,7 +671,7 @@ export function updateFactionSensors(
       continue;
     }
     for (const friendly of observers) {
-      const ch = evaluateSensorChannels(unit, friendly, world, irByUnit);
+      const ch = evaluateSensorChannels(unit, friendly, world, irByUnit, occluders);
       if (!ch.occluded && ch.ladarHit) {
         const existingAlert = memory.get(alertId);
         const trackId = existingAlert?.trackId ?? allocateTrackId(world, observerFaction);
@@ -773,8 +778,9 @@ export function stepSensorsAndFog(
   world: WorldState,
   irByUnit?: ReadonlyMap<string, number>,
 ): void {
-  updateFactionSensors(world, 'earth', irByUnit);
-  updateFactionSensors(world, 'mars', irByUnit);
+  const occluders = getWorldOccluders(world);
+  updateFactionSensors(world, 'earth', irByUnit, occluders);
+  updateFactionSensors(world, 'mars', irByUnit, occluders);
 }
 
 /**

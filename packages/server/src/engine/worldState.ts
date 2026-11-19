@@ -12,6 +12,7 @@ import {
   type KeplerOrbit,
   type LogisticsRoute,
   type MunitionEntity,
+  type OccluderBody,
   type PropulsionType,
   type ResourceType,
   type SensorTrack,
@@ -73,11 +74,25 @@ export interface WorldState {
   nextTrackSeqByFaction: Record<FactionId, number>;
   sensorBlindUntilSec: Map<string, number>;
   laserActiveUnitIds: Set<string>;
+  laserAblationByUnit: Map<string, number>;
   launchedDronesByCarrier: Map<string, number>;
   routesByFaction: Record<FactionId, LogisticsRoute[]>;
   factions: Record<FactionId, FactionRuntimeState>;
   vfxEvents: VfxEvent[];
   winner: FactionId | null;
+}
+
+/**
+ * Evaluates all celestial body positions once at `world.gameTimeSec` so per-tick
+ * occlusion and umbra checks avoid redundant Kepler solves across O(N^2) entity pairs.
+ */
+export function getWorldOccluders(world: WorldState): OccluderBody[] {
+  return world.celestials.map((body) => ({
+    id: body.id,
+    pos: getBodyStateAt(body, world.gameTimeSec).pos,
+    occlusionRadiusAu: body.occlusionRadiusAu,
+    umbraLengthAu: body.umbraLengthAu,
+  }));
 }
 
 function createInitialWonderSlots(): WonderSlot[] {
@@ -239,6 +254,7 @@ export function createInitialWorldState(): WorldState {
     },
     sensorBlindUntilSec: new Map(),
     laserActiveUnitIds: new Set(),
+    laserAblationByUnit: new Map(),
     launchedDronesByCarrier: new Map(),
     routesByFaction: {
       earth: [],
