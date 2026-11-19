@@ -6,6 +6,7 @@ import {
   WONDER_CONFIG,
   getBodyStateAt,
   orbitToState,
+  type BuildQueueKind,
   type CelestialBody,
   type FactionId,
   type FactionSnapshot,
@@ -18,6 +19,7 @@ import {
   type SensorTrack,
   type SuspectedTrackKind,
   type TrackConfidence,
+  type TransferMode,
   type UnitEntity,
   type UnitKind,
   type Vec2,
@@ -61,6 +63,29 @@ export interface FactionRuntimeState {
   wonder: WonderSlot[];
 }
 
+export interface FreighterFlightMeta {
+  routeId: string;
+  sourceBodyId: string;
+  targetId: string;
+  resource: ResourceType;
+  amount: number;
+  transferMode: TransferMode;
+  detourWaypoint?: Vec2;
+  detourReached: boolean;
+  lastGuidedSec?: number;
+  penaltyApplied?: boolean;
+}
+
+export interface ProductionQueueItem {
+  id: string;
+  kind: BuildQueueKind;
+  remainingSec: number;
+  totalSec: number;
+  targetRef?: string | Vec2;
+  targetBodyId?: string;
+  wonderSlotIndex?: number;
+}
+
 export interface WorldState {
   tick: number;
   gameTimeSec: number;
@@ -77,6 +102,13 @@ export interface WorldState {
   laserAblationByUnit: Map<string, number>;
   launchedDronesByCarrier: Map<string, number>;
   routesByFaction: Record<FactionId, LogisticsRoute[]>;
+  outpostBodyByUnitId: Map<string, string>;
+  freighterMeta: Map<string, FreighterFlightMeta>;
+  nextFreighterSeqByFaction: Record<FactionId, number>;
+  nextFacilitySeqByFaction: Record<FactionId, number>;
+  productionQueueByFaction: Record<FactionId, ProductionQueueItem[]>;
+  nextBuildSeqByFaction: Record<FactionId, number>;
+  wonderStabilizedSecByFaction: Record<FactionId, number>;
   factions: Record<FactionId, FactionRuntimeState>;
   vfxEvents: VfxEvent[];
   winner: FactionId | null;
@@ -120,6 +152,7 @@ export function createUnitEntity(params: {
   emconSilent?: boolean;
   radarActive?: boolean;
   jammerActive?: boolean;
+  cargo?: Partial<Record<ResourceType, number>>;
 }): UnitEntity {
   const cfg = UNIT_CONFIGS[params.kind];
   const tSec = params.gameTimeSec ?? 0;
@@ -150,17 +183,29 @@ export function createUnitEntity(params: {
     emconSilent,
     radarActive: emconSilent ? false : (params.radarActive ?? false),
     jammerActive: emconSilent ? false : (params.jammerActive ?? false),
+    ...(params.cargo ? { cargo: { ...params.cargo } } : {}),
     ammoStock: cfg.weapons.ammoCapacity,
     plannedBurns: [],
   };
 }
 
+export interface InitialWorldOptions {
+  template?: 'default' | 'five_minute_startup';
+}
+
 /**
  * Creates a fresh symmetric inner-solar-system match state for Earth vs Mars.
+ * Supports `'default'` (includes starter combat test hulls) and `'five_minute_startup'`
+ * (auxiliary units + 2 starter mines per side, zero mainline combat warships).
  */
-export function createInitialWorldState(): WorldState {
+export function createInitialWorldState(options: InitialWorldOptions = {}): WorldState {
   const earthOrbit = CELESTIAL_BODIES_BY_ID.earth!.orbit!;
   const marsOrbit = CELESTIAL_BODIES_BY_ID.mars!.orbit!;
+  const venusOrbit = CELESTIAL_BODIES_BY_ID.venus!.orbit!;
+  const mercuryOrbit = CELESTIAL_BODIES_BY_ID.mercury!.orbit!;
+  const vestaOrbit = CELESTIAL_BODIES_BY_ID.vesta!.orbit!;
+  const ceresOrbit = CELESTIAL_BODIES_BY_ID.ceres!.orbit!;
+  const template = options.template ?? 'default';
 
   const initialUnits: UnitEntity[] = [
     createUnitEntity({
@@ -171,23 +216,24 @@ export function createInitialWorldState(): WorldState {
       radarActive: true,
     }),
     createUnitEntity({
+      id: 'earth-outpost-venus',
+      faction: 'earth',
+      kind: 'mining_outpost',
+      orbit: venusOrbit,
+      cargo: { ore: 100, propellant: 40 },
+    }),
+    createUnitEntity({
+      id: 'earth-outpost-mercury',
+      faction: 'earth',
+      kind: 'mining_outpost',
+      orbit: mercuryOrbit,
+      cargo: { ore: 100 },
+    }),
+    createUnitEntity({
       id: 'earth-recon-1',
       faction: 'earth',
       kind: 'recon_corvette',
       orbit: { ...earthOrbit, a: 1.03, meanAnomaly0: 0.05 },
-    }),
-    createUnitEntity({
-      id: 'earth-raider-1',
-      faction: 'earth',
-      kind: 'raider',
-      orbit: { ...earthOrbit, a: 1.01, meanAnomaly0: 6.22 },
-      emconSilent: true,
-    }),
-    createUnitEntity({
-      id: 'earth-cruiser-1',
-      faction: 'earth',
-      kind: 'cruiser',
-      orbit: { ...earthOrbit, a: 1.04, meanAnomaly0: 0.02 },
     }),
     createUnitEntity({
       id: 'earth-tanker-1',
@@ -203,23 +249,24 @@ export function createInitialWorldState(): WorldState {
       radarActive: true,
     }),
     createUnitEntity({
+      id: 'mars-outpost-vesta',
+      faction: 'mars',
+      kind: 'mining_outpost',
+      orbit: vestaOrbit,
+      cargo: { ore: 100 },
+    }),
+    createUnitEntity({
+      id: 'mars-outpost-ceres',
+      faction: 'mars',
+      kind: 'mining_outpost',
+      orbit: ceresOrbit,
+      cargo: { ore: 40, propellant: 100 },
+    }),
+    createUnitEntity({
       id: 'mars-recon-1',
       faction: 'mars',
       kind: 'recon_corvette',
       orbit: { ...marsOrbit, a: 1.49, meanAnomaly0: 0.72 },
-    }),
-    createUnitEntity({
-      id: 'mars-raider-1',
-      faction: 'mars',
-      kind: 'raider',
-      orbit: { ...marsOrbit, a: 1.5, meanAnomaly0: 0.78 },
-      emconSilent: true,
-    }),
-    createUnitEntity({
-      id: 'mars-cruiser-1',
-      faction: 'mars',
-      kind: 'cruiser',
-      orbit: { ...marsOrbit, a: 1.54, meanAnomaly0: 0.74 },
     }),
     createUnitEntity({
       id: 'mars-tanker-1',
@@ -228,6 +275,37 @@ export function createInitialWorldState(): WorldState {
       orbit: { ...marsOrbit, a: 1.51, meanAnomaly0: 0.76 },
     }),
   ];
+
+  if (template !== 'five_minute_startup') {
+    initialUnits.push(
+      createUnitEntity({
+        id: 'earth-raider-1',
+        faction: 'earth',
+        kind: 'raider',
+        orbit: { ...earthOrbit, a: 1.01, meanAnomaly0: 6.22 },
+        emconSilent: true,
+      }),
+      createUnitEntity({
+        id: 'earth-cruiser-1',
+        faction: 'earth',
+        kind: 'cruiser',
+        orbit: { ...earthOrbit, a: 1.04, meanAnomaly0: 0.02 },
+      }),
+      createUnitEntity({
+        id: 'mars-raider-1',
+        faction: 'mars',
+        kind: 'raider',
+        orbit: { ...marsOrbit, a: 1.5, meanAnomaly0: 0.78 },
+        emconSilent: true,
+      }),
+      createUnitEntity({
+        id: 'mars-cruiser-1',
+        faction: 'mars',
+        kind: 'cruiser',
+        orbit: { ...marsOrbit, a: 1.54, meanAnomaly0: 0.74 },
+      }),
+    );
+  }
 
   return {
     tick: 0,
@@ -257,8 +335,81 @@ export function createInitialWorldState(): WorldState {
     laserAblationByUnit: new Map(),
     launchedDronesByCarrier: new Map(),
     routesByFaction: {
+      earth: [
+        {
+          id: 'route-earth-venus-ore',
+          faction: 'earth',
+          sourceBodyId: 'venus',
+          targetId: 'earth-home-base',
+          resource: 'ore',
+          paused: false,
+          batchSize: 1,
+          transferMode: 'fuel',
+          escortUnitIds: [],
+        },
+        {
+          id: 'route-earth-mercury-ore',
+          faction: 'earth',
+          sourceBodyId: 'mercury',
+          targetId: 'earth-home-base',
+          resource: 'ore',
+          paused: false,
+          batchSize: 1,
+          transferMode: 'fuel',
+          escortUnitIds: [],
+        },
+      ],
+      mars: [
+        {
+          id: 'route-mars-vesta-ore',
+          faction: 'mars',
+          sourceBodyId: 'vesta',
+          targetId: 'mars-home-base',
+          resource: 'ore',
+          paused: false,
+          batchSize: 1,
+          transferMode: 'fuel',
+          escortUnitIds: [],
+        },
+        {
+          id: 'route-mars-ceres-propellant',
+          faction: 'mars',
+          sourceBodyId: 'ceres',
+          targetId: 'mars-home-base',
+          resource: 'propellant',
+          paused: false,
+          batchSize: 1,
+          transferMode: 'fuel',
+          escortUnitIds: [],
+        },
+      ],
+    },
+    outpostBodyByUnitId: new Map<string, string>([
+      ['earth-outpost-venus', 'venus'],
+      ['earth-outpost-mercury', 'mercury'],
+      ['mars-outpost-vesta', 'vesta'],
+      ['mars-outpost-ceres', 'ceres'],
+    ]),
+    freighterMeta: new Map(),
+    nextFreighterSeqByFaction: {
+      earth: 1,
+      mars: 1,
+    },
+    nextFacilitySeqByFaction: {
+      earth: 1,
+      mars: 1,
+    },
+    productionQueueByFaction: {
       earth: [],
       mars: [],
+    },
+    nextBuildSeqByFaction: {
+      earth: 1,
+      mars: 1,
+    },
+    wonderStabilizedSecByFaction: {
+      earth: 0,
+      mars: 0,
     },
     factions: {
       earth: {
@@ -277,6 +428,14 @@ export function createInitialWorldState(): WorldState {
     vfxEvents: [],
     winner: null,
   };
+}
+
+/**
+ * Convenience factory for the 5-minute startup match template:
+ * zero mainline warships at t=0, auxiliary fleet + 2 starter mine routes per side.
+ */
+export function createFiveMinuteStartupWorldState(): WorldState {
+  return createInitialWorldState({ template: 'five_minute_startup' });
 }
 
 function cloneUnit(u: UnitEntity): UnitEntity {

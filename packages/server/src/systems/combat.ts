@@ -11,6 +11,7 @@ import {
 import type { TickSystemHook } from '../engine/simulationLoop.js';
 import { getWorldOccluders, type WorldState } from '../engine/worldState.js';
 import { applyLaserDazzle } from './ew.js';
+import { handleFreighterDestroyed } from './logistics.js';
 import { getWeaponSubsystemFactor } from './munitions.js';
 import { getThermalSubsystemFactor } from './thermal.js';
 
@@ -138,6 +139,9 @@ export function applyUnitDamage(
 
   if (nextHp <= 0 && updated.kind === 'home_base' && world.winner === null) {
     world.winner = updated.faction === 'earth' ? 'mars' : 'earth';
+  }
+  if (nextHp <= 0 && updated.kind === 'freighter') {
+    handleFreighterDestroyed(world, updated);
   }
 
   return updated;

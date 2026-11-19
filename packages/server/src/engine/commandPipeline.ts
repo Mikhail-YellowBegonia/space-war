@@ -1,4 +1,5 @@
 import {
+  LOGISTICS_CONFIG,
   UNIT_CONFIGS,
   solveInterceptTransfer,
   solveOrbitInsertion,
@@ -9,6 +10,7 @@ import {
   type UnitEntity,
 } from '@space-war/shared';
 import { launchCarrierDrone } from '../systems/ew.js';
+import { enqueueFactionBuild } from '../systems/logistics.js';
 import { fireMunitionSalvo } from '../systems/munitions.js';
 import type { WorldState } from './worldState.js';
 
@@ -200,10 +202,20 @@ export function applyPlayerCommand(
       if (idx === -1) {
         return { accepted: false, reason: `Unknown logistics route: ${command.routeId}` };
       }
-      routes[idx] = {
+      const next = {
         ...routes[idx]!,
         ...command.patch,
       };
+      if ('detourWaypoint' in command.patch && command.patch.detourWaypoint === undefined) {
+        delete next.detourWaypoint;
+      }
+      if (command.patch.batchSize !== undefined) {
+        next.batchSize = Math.max(
+          LOGISTICS_CONFIG.minBatchSize,
+          Math.min(LOGISTICS_CONFIG.maxBatchSize, Math.round(command.patch.batchSize)),
+        );
+      }
+      routes[idx] = next;
       return { accepted: true };
     }
 
@@ -228,7 +240,7 @@ export function applyPlayerCommand(
     }
 
     case 'queue_build': {
-      return { accepted: false, reason: 'queue_build system pending M4 integration' };
+      return enqueueFactionBuild(world, faction, command.kind, command.targetRef);
     }
   }
 }
