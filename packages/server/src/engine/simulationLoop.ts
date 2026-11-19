@@ -1,0 +1,117 @@
+import {
+  PROPULSION_CONFIGS,
+  SIM_TICK_RATE_HZ,
+  advanceUnitOrbit,
+  type FactionId,
+  type FactionSnapshot,
+  type PlayerCommand,
+} from '@space-war/shared';
+import { applyPlayerCommand, type CommandValidationResult } from './commandPipeline.js';
+import { buildFactionSnapshot, createInitialWorldState, type WorldState } from './worldState.js';
+
+export interface TickSystemContext {
+  world: WorldState;
+  dtSec: number;
+  usedDeltaVByUnit: ReadonlyMap<string, number>;
+}
+
+export type TickSystemHook = (ctx: TickSystemContext) => void;
+
+export interface SimulationLoopOptions {
+  tickRateHz?: number;
+  systems?: TickSystemHook[];
+  onTick?: (world: WorldState) => void;
+}
+
+/**
+ * Authoritative 10Hz fixed-timestep simulation loop managing unit orbital kinematics,
+ * command validation/application, system hooks, and per-faction snapshot extraction.
+ */
+export class SimulationLoop {
+  public readonly world: WorldState;
+  public readonly tickRateHz: number;
+  public readonly dtSec: number;
+  private readonly systems: TickSystemHook[];
+  private readonly onTick?: (world: WorldState) => void;
+  private timer: ReturnType<typeof setInterval> | null = null;
+
+  constructor(
+    initialWorld: WorldState = createInitialWorldState(),
+    options: SimulationLoopOptions = {},
+  ) {
+    this.world = initialWorld;
+    this.tickRateHz = options.tickRateHz ?? SIM_TICK_RATE_HZ;
+    this.dtSec = 1 / this.tickRateHz;
+    this.systems = [...(options.systems ?? [])];
+    this.onTick = options.onTick;
+  }
+
+  public registerSystem(hook: TickSystemHook): void {
+    this.systems.push(hook);
+  }
+
+  public submitCommand(faction: FactionId, command: PlayerCommand): CommandValidationResult {
+    return applyPlayerCommand(this.world, faction, command);
+  }
+
+  public stepTick(): void {
+    const prevTimeSec = this.world.gameTimeSec;
+    this.world.vfxEvents = [];
+
+    const usedDeltaVByUnit = new Map<string, number>();
+
+    for (const [unitId, unit] of this.world.units.entries()) {
+      const result = advanceUnitOrbit(unit, prevTimeSec, this.dtSec);
+      this.world.units.set(unitId, result.unit);
+
+      if (result.usedDeltaV > 0) {
+        usedDeltaVByUnit.set(unitId, result.usedDeltaV);
+        const irFactor = PROPULSION_CONFIGS[unit.propulsion].irFactor;
+        this.world.vfxEvents.push({
+          kind: 'burn_flash',
+          from: { ...result.unit.pos },
+          intensity: Math.min(1, Math.max(0.05, irFactor / 100)),
+        });
+      }
+    }
+
+    this.world.tick += 1;
+    this.world.gameTimeSec = Number((this.world.tick * this.dtSec).toFixed(6));
+
+    for (const system of this.systems) {
+      system({
+        world: this.world,
+        dtSec: this.dtSec,
+        usedDeltaVByUnit,
+      });
+    }
+
+    this.onTick?.(this.world);
+  }
+
+  public getSnapshot(faction: FactionId): FactionSnapshot {
+    return buildFactionSnapshot(this.world, faction);
+  }
+
+  public start(): void {
+    if (this.timer !== null) {
+      return;
+    }
+    const intervalMs = Math.max(10, Math.round(1000 / this.tickRateHz));
+    this.timer = setInterval(() => {
+      this.stepTick();
+    }, intervalMs);
+  }
+
+  public stop(): void {
+    if (this.timer === null) {
+      return;
+    }
+    clearInterval(this.timer);
+    this.timer = null;
+  }
+
+  public isRunning(): boolean {
+    return this.timer !== null;
+  }
+}

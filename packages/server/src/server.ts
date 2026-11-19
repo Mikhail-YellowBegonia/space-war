@@ -1,7 +1,9 @@
+import { randomUUID } from 'node:crypto';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { PROTOCOL_VERSION, SIM_TICK_RATE_HZ } from '@space-war/shared';
-import { WebSocketServer } from 'ws';
+import { PROTOCOL_VERSION, SIM_TICK_RATE_HZ, type ServerMessage } from '@space-war/shared';
+import { WebSocket, WebSocketServer } from 'ws';
+import { RoomManager, type ClientConnection, type RoomManagerOptions } from './net/roomManager.js';
 
 export const DEFAULT_PORT = 3001;
 
@@ -15,9 +17,11 @@ export interface HealthPayload {
 export interface SpaceWarServerOptions {
   port?: number;
   host?: string;
+  roomManagerOptions?: RoomManagerOptions;
 }
 
 export interface SpaceWarServer {
+  roomManager: RoomManager;
   start: () => Promise<{ host: string; port: number }>;
   close: () => Promise<void>;
 }
@@ -53,19 +57,38 @@ export function createSpaceWarServer(options: SpaceWarServerOptions = {}): Space
   const port = options.port ?? DEFAULT_PORT;
   const host = options.host ?? '127.0.0.1';
 
+  const roomManager = new RoomManager({
+    autoStartLoop: true,
+    ...options.roomManagerOptions,
+  });
+
   const httpServer = createServer(handleHttpRequest);
   const wss = new WebSocketServer({ server: httpServer });
 
   wss.on('connection', (socket) => {
-    socket.send(
-      JSON.stringify({
-        type: 'hello',
-        protocolVersion: PROTOCOL_VERSION,
-      }),
-    );
+    const conn: ClientConnection = {
+      id: randomUUID(),
+      send: (message: ServerMessage) => {
+        if (socket.readyState === WebSocket.OPEN) {
+          socket.send(JSON.stringify(message));
+        }
+      },
+    };
+
+    roomManager.handleConnect(conn);
+
+    socket.on('message', (data) => {
+      const text = typeof data === 'string' ? data : data.toString('utf8');
+      roomManager.handleMessage(conn, text);
+    });
+
+    socket.on('close', () => {
+      roomManager.handleDisconnect(conn);
+    });
   });
 
   return {
+    roomManager,
     start: () =>
       new Promise((resolve, reject) => {
         const onError = (err: Error) => {
@@ -88,6 +111,7 @@ export function createSpaceWarServer(options: SpaceWarServerOptions = {}): Space
 
     close: () =>
       new Promise((resolve, reject) => {
+        roomManager.stopAll();
         for (const client of wss.clients) {
           client.terminate();
         }
