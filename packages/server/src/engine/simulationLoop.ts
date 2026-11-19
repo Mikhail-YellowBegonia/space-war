@@ -9,6 +9,7 @@ import {
 import { applyPlayerCommand, type CommandValidationResult } from './commandPipeline.js';
 import { buildFactionSnapshot, createInitialWorldState, type WorldState } from './worldState.js';
 import { createThermalTickSystem } from '../systems/thermal.js';
+import { createEwTickSystem } from '../systems/ew.js';
 import { createSensorTickSystem } from '../systems/sensors.js';
 
 export interface TickSystemContext {
@@ -47,6 +48,7 @@ export class SimulationLoop {
     this.dtSec = 1 / this.tickRateHz;
     this.systems = [
       createThermalTickSystem(this.irByUnit),
+      createEwTickSystem(),
       createSensorTickSystem(this.irByUnit),
       ...(options.systems ?? []),
     ];
