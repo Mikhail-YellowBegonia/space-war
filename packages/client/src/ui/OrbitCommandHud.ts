@@ -39,6 +39,9 @@ import {
   type MatchFlowState,
 } from './MatchFlowController.js';
 import { CicSoundEngine } from '../audio/index.js';
+import type { CameraFollowTarget } from '../camera/index.js';
+import { buildOrbitFromApsides } from '../interaction/orbitDragMath.js';
+import { morphDomHtml } from './domMorph.js';
 
 export interface HudConnectionConfig {
   mode: 'mock' | 'ws';
@@ -57,6 +60,12 @@ export interface OrbitCommandHudOptions {
   matchFlow?: MatchFlowController;
   soundEngine?: CicSoundEngine;
   onResetCamera?: () => void;
+  getFollowTarget?: () => CameraFollowTarget | null;
+  onToggleFollowSelected?: () => void;
+  onFollowBody?: (bodyId: string, label: string) => void;
+  onClearFollow?: () => void;
+  getTimeScale?: () => number;
+  onSetTimeScale?: (scale: number) => void;
   onLaunchSession?: (playMode: LobbyPlayMode, roomId: string, faction: FactionId) => void;
   connection?: HudConnectionConfig;
 }
@@ -95,6 +104,12 @@ export class OrbitCommandHud {
   private readonly ownsSoundEngine: boolean;
   private readonly unitController: UnitControlPanelController;
   private readonly onResetCamera?: () => void;
+  private readonly getFollowTarget?: () => CameraFollowTarget | null;
+  private readonly onToggleFollowSelected?: () => void;
+  private readonly onFollowBody?: (bodyId: string, label: string) => void;
+  private readonly onClearFollow?: () => void;
+  private readonly getTimeScale?: () => number;
+  private readonly onSetTimeScale?: (scale: number) => void;
   private readonly onLaunchSession?: (
     playMode: LobbyPlayMode,
     roomId: string,
@@ -108,6 +123,7 @@ export class OrbitCommandHud {
   private logisticsState: LogisticsUiState;
   private flowState: MatchFlowState;
   private activeDrawer: ActiveDrawerTab = 'none';
+  private lastRenderedHtml = '';
   private unsubProvider: () => void;
   private unsubInteraction: () => void;
   private unsubFireControl: () => void;
@@ -129,6 +145,12 @@ export class OrbitCommandHud {
     this.soundEngine = options.soundEngine ?? new CicSoundEngine();
     this.unitController = new UnitControlPanelController(this.provider);
     this.onResetCamera = options.onResetCamera;
+    this.getFollowTarget = options.getFollowTarget;
+    this.onToggleFollowSelected = options.onToggleFollowSelected;
+    this.onFollowBody = options.onFollowBody;
+    this.onClearFollow = options.onClearFollow;
+    this.getTimeScale = options.getTimeScale;
+    this.onSetTimeScale = options.onSetTimeScale;
     this.onLaunchSession = options.onLaunchSession;
     this.connection = options.connection;
 
@@ -140,6 +162,7 @@ export class OrbitCommandHud {
 
     this.root.addEventListener('click', this.handleClick);
     this.root.addEventListener('change', this.handleInputChange);
+    this.root.addEventListener('input', this.handleInputChange);
     this.unsubProvider = this.provider.subscribe((snap) => {
       this.snapshot = snap;
       this.matchFlow.observeSnapshot(snap);
@@ -234,9 +257,14 @@ export class OrbitCommandHud {
     }
   }
 
+  notifyCameraStateChange(): void {
+    this.render();
+  }
+
   dispose(): void {
     this.root.removeEventListener('click', this.handleClick);
     this.root.removeEventListener('change', this.handleInputChange);
+    this.root.removeEventListener('input', this.handleInputChange);
     this.unsubProvider();
     this.unsubInteraction();
     this.unsubFireControl();
@@ -258,14 +286,44 @@ export class OrbitCommandHud {
 
   private readonly handleInputChange = (event: Event): void => {
     const target = event.target as HTMLInputElement | null;
-    if (!target || target.id !== 'cic-ladar-slider') {
+    if (!target) {
       return;
     }
-    const unitId = this.interactionState.selectedUnitId;
-    if (!unitId) return;
-    const deg = Number(target.value);
-    if (Number.isFinite(deg)) {
-      void this.unitController.setLadarAngleDeg(unitId, deg);
+
+    if (target.id === 'cic-ladar-slider') {
+      const unitId = this.interactionState.selectedUnitId;
+      if (!unitId) return;
+      const deg = Number(target.value);
+      if (Number.isFinite(deg)) {
+        void this.unitController.setLadarAngleDeg(unitId, deg);
+      }
+      return;
+    }
+
+    if (
+      target.id === 'cic-orbit-rp' ||
+      target.id === 'cic-orbit-ra' ||
+      target.id === 'cic-orbit-omega'
+    ) {
+      const rpInput = this.root.querySelector<HTMLInputElement>('#cic-orbit-rp');
+      const raInput = this.root.querySelector<HTMLInputElement>('#cic-orbit-ra');
+      const omegaInput = this.root.querySelector<HTMLInputElement>('#cic-orbit-omega');
+      const handles = this.interactionState.apsisHandles;
+      const rp = Number(rpInput?.value ?? handles?.rp ?? 1.0);
+      const ra = Number(raInput?.value ?? handles?.ra ?? 1.0);
+      const omegaDeg = Number(omegaInput?.value ?? 0);
+      if (!Number.isFinite(rp) || !Number.isFinite(ra) || !Number.isFinite(omegaDeg)) {
+        return;
+      }
+      const omegaRad = (omegaDeg * Math.PI) / 180;
+      if (event.type === 'input') {
+        this.interaction.updateDraftOrbit(
+          buildOrbitFromApsides(rp, ra, omegaRad, this.interactionState.draftOrbit?.epochSec ?? 0),
+          true,
+        );
+      } else {
+        this.interaction.setDraftOrbitApsides(rp, ra, omegaRad);
+      }
     }
   };
 
@@ -317,6 +375,51 @@ export class OrbitCommandHud {
       }
       case 'reset-camera': {
         this.onResetCamera?.();
+        break;
+      }
+      case 'toggle-follow-selected': {
+        this.onToggleFollowSelected?.();
+        break;
+      }
+      case 'follow-body': {
+        const bodyId = actionEl.dataset.bodyId;
+        const label = actionEl.dataset.label ?? bodyId;
+        if (bodyId && label) {
+          this.onFollowBody?.(bodyId, label);
+        }
+        break;
+      }
+      case 'clear-follow': {
+        this.onClearFollow?.();
+        break;
+      }
+      case 'set-time-scale': {
+        const scale = Number(actionEl.dataset.scale);
+        if (Number.isFinite(scale)) {
+          this.onSetTimeScale?.(scale);
+          this.render();
+        }
+        break;
+      }
+      case 'orbit-preset': {
+        const radiusAu = Number(actionEl.dataset.radiusAu);
+        if (Number.isFinite(radiusAu)) {
+          this.interaction.setCircularDraftOrbit(
+            radiusAu,
+            this.interactionState.draftOrbit?.omega ?? 0,
+          );
+        }
+        break;
+      }
+      case 'orbit-circularize': {
+        const handles = this.interactionState.apsisHandles;
+        if (handles) {
+          const avgRadius = 0.5 * (handles.rp + handles.ra);
+          this.interaction.setCircularDraftOrbit(
+            avgRadius,
+            this.interactionState.draftOrbit?.omega ?? 0,
+          );
+        }
         break;
       }
       case 'switch-net-mode': {
@@ -487,26 +590,22 @@ export class OrbitCommandHud {
     }
   };
 
-  private render(): void {
-    const activeEl =
-      typeof document !== 'undefined' ? (document.activeElement as HTMLElement | null) : null;
-    if (
-      activeEl &&
-      (activeEl.id === 'cic-room-id' ||
-        activeEl.id === 'cic-lobby-room' ||
-        activeEl.id === 'cic-faction-select' ||
-        activeEl.id === 'cic-ladar-slider')
-    ) {
+  private applyHtml(nextHtml: string): void {
+    if (nextHtml === this.lastRenderedHtml) {
       return;
     }
+    this.lastRenderedHtml = nextHtml;
+    morphDomHtml(this.root, nextHtml);
+  }
 
+  private render(): void {
     if (this.flowState.phase === 'lobby') {
-      this.root.innerHTML = this.renderLobbyScreen();
+      this.applyHtml(this.renderLobbyScreen());
       return;
     }
 
     if (this.flowState.phase === 'victory') {
-      this.root.innerHTML = this.renderVictoryScreen();
+      this.applyHtml(this.renderVictoryScreen());
       return;
     }
 
@@ -532,17 +631,56 @@ export class OrbitCommandHud {
     let modeDetailHtml = '';
     if (interactionState.mode === 'orbit_insertion') {
       const handles = interactionState.apsisHandles;
-      modeDetailHtml = `<div class="cic-hint">
-        拖拽星图或 <b>P</b>(近日点)/<b>A</b>(远日点) 手柄调节目标椭圆
-        ${handles ? ` · rp=${handles.rp.toFixed(2)} AU / ra=${handles.ra.toFixed(2)} AU` : ''}
+      const rpVal = handles ? handles.rp : 1.0;
+      const raVal = handles ? handles.ra : 1.0;
+      const omegaDeg = interactionState.draftOrbit
+        ? Math.round(
+            ((((interactionState.draftOrbit.omega * 180) / Math.PI) % 360) + 360) % 360,
+          )
+        : 0;
+      modeDetailHtml = `<div class="cic-orbit-designer">
+        <div class="orbit-help-line">
+          <b>[2] 进入轨道</b>：为所选舰船规划新的<b>绕日圆轨 / 椭圆巡逻轨</b>（若要追击星球或敌舰请用 [3] 交会拦截）
+        </div>
+        <div class="orbit-step-line">
+          ① 点击星图设圆轨 / 拖拽 <b>P</b>·<b>A</b> 调椭圆 → ② 右侧选转移方案 → ③ 点「执行机动」[Enter]
+        </div>
+        <div class="orbit-preset-row">
+          <span>快捷圆轨:</span>
+          <button class="cic-mini-btn" data-action="orbit-preset" data-radius-au="0.72">金星 0.72</button>
+          <button class="cic-mini-btn" data-action="orbit-preset" data-radius-au="1.00">地球 1.00</button>
+          <button class="cic-mini-btn" data-action="orbit-preset" data-radius-au="1.32">爱神 1.32</button>
+          <button class="cic-mini-btn" data-action="orbit-preset" data-radius-au="1.52">火星 1.52</button>
+          <button class="cic-mini-btn" data-action="orbit-preset" data-radius-au="2.36">小行星带 2.36</button>
+          <button class="cic-mini-btn" data-action="orbit-circularize">拉成圆轨</button>
+        </div>
+        <div class="orbit-sliders-row">
+          <label class="orbit-slider-item">
+            <span>近日 rp <b>${rpVal.toFixed(2)} AU</b></span>
+            <input id="cic-orbit-rp" class="cic-slider" type="range" min="0.25" max="4.50" step="0.02" value="${rpVal.toFixed(2)}" />
+          </label>
+          <label class="orbit-slider-item">
+            <span>远日 ra <b>${raVal.toFixed(2)} AU</b></span>
+            <input id="cic-orbit-ra" class="cic-slider" type="range" min="0.25" max="4.50" step="0.02" value="${raVal.toFixed(2)}" />
+          </label>
+          <label class="orbit-slider-item">
+            <span>朝向 ω <b>${omegaDeg}°</b></span>
+            <input id="cic-orbit-omega" class="cic-slider" type="range" min="0" max="355" step="5" value="${omegaDeg}" />
+          </label>
+        </div>
       </div>`;
     } else if (interactionState.mode === 'intercept') {
+      const enemyHome =
+        snapshot.faction === 'earth'
+          ? { id: 'mars', label: 'Mars' }
+          : { id: 'earth', label: 'Earth' };
+      const firstTrack = snapshot.tracks.find((t) => t.confidence !== 'bearing');
       modeDetailHtml = `<div class="cic-hint">
-        点击星图天体/航迹，或快捷选择目标:
-        <button class="cic-mini-btn" data-action="pick-target" data-ref-id="mars" data-label="Mars">Mars</button>
+        点击星图天体/航迹，或快捷选择交会目标:
+        <button class="cic-mini-btn" data-action="pick-target" data-ref-id="${enemyHome.id}" data-label="${enemyHome.label}">${enemyHome.label}</button>
         <button class="cic-mini-btn" data-action="pick-target" data-ref-id="eros" data-label="433 Eros">433 Eros</button>
         <button class="cic-mini-btn" data-action="pick-target" data-ref-id="ceres" data-label="1 Ceres">1 Ceres</button>
-        <button class="cic-mini-btn" data-action="pick-target" data-ref-id="trk-mars-home" data-label="trk-mars-home">Mars Track</button>
+        ${firstTrack ? `<button class="cic-mini-btn" data-action="pick-target" data-ref-id="${escapeHtml(firstTrack.trackId)}" data-label="${escapeHtml(firstTrack.trackId)}">${escapeHtml(firstTrack.trackId)}</button>` : ''}
         ${interactionState.interceptTarget ? ` · 已锁定: <b>${escapeHtml(interactionState.interceptTarget.label)}</b>` : ''}
       </div>`;
     }
@@ -643,11 +781,41 @@ export class OrbitCommandHud {
       : '';
 
     const completeWonderCount = snapshot.ownWonder.filter((s) => s.status === 'complete').length;
+    const followTarget = this.getFollowTarget?.() ?? null;
+    const isFollowingSelected =
+      followTarget !== null &&
+      selectedUnit !== null &&
+      followTarget.kind === 'unit' &&
+      followTarget.id === selectedUnit.id;
 
-    this.root.innerHTML = `
+    const currentScale = this.getTimeScale?.();
+    const speedBarHtml =
+      conn?.mode !== 'ws' && this.onSetTimeScale && currentScale !== undefined
+        ? `<div class="cic-speedbar">
+            <span>流速:</span>
+            <button class="cic-mini-btn ${currentScale === 0 ? 'active' : ''}" data-action="set-time-scale" data-scale="0">暂停</button>
+            <button class="cic-mini-btn ${Math.abs(currentScale - 0.25) < 0.01 ? 'active' : ''}" data-action="set-time-scale" data-scale="0.25">0.25x</button>
+            <button class="cic-mini-btn ${Math.abs(currentScale - 0.5) < 0.01 ? 'active' : ''}" data-action="set-time-scale" data-scale="0.5">0.5x</button>
+            <button class="cic-mini-btn ${Math.abs(currentScale - 1) < 0.01 ? 'active' : ''}" data-action="set-time-scale" data-scale="1">1x</button>
+          </div>`
+        : '';
+
+    const trackBarHtml = `<div class="cic-trackbar">
+      <button class="cic-mini-btn ${isFollowingSelected ? 'active' : ''}" data-action="toggle-follow-selected">[T] 跟踪选中</button>
+      <button class="cic-mini-btn ${followTarget?.kind === 'body' && followTarget.id === 'earth' ? 'active' : ''}" data-action="follow-body" data-body-id="earth" data-label="Earth">地球</button>
+      <button class="cic-mini-btn ${followTarget?.kind === 'body' && followTarget.id === 'eros' ? 'active' : ''}" data-action="follow-body" data-body-id="eros" data-label="433 Eros">爱神</button>
+      <button class="cic-mini-btn ${followTarget?.kind === 'body' && followTarget.id === 'mars' ? 'active' : ''}" data-action="follow-body" data-body-id="mars" data-label="Mars">火星</button>
+      ${followTarget ? `<button class="cic-mini-btn active" data-action="clear-follow">🔒 锁定:${escapeHtml(followTarget.label)} ×</button>` : ''}
+    </div>`;
+
+    const nextHtml = `
       <div class="cic-topbar">
         <div class="cic-clock">${escapeHtml(netLabel)} · T+${formatDurationMmSs(snapshot.gameTimeSec)} · ORE ${Math.round(snapshot.resources.ore)} · PROP ${Math.round(snapshot.resources.propellant)} · 运力 ${snapshot.freightersInFlight}/${snapshot.freighterCap} · 奇观 ${completeWonderCount}/${WONDER_CONFIG.slotCount}</div>
-        ${netSwitchHtml}
+        <div class="cic-subbar">
+          ${netSwitchHtml}
+          ${speedBarHtml}
+          ${trackBarHtml}
+        </div>
         <div class="cic-modes">
           ${modeBtn('select', '选择', '1')}
           ${modeBtn('orbit_insertion', '进入轨道', '2')}
@@ -672,6 +840,7 @@ export class OrbitCommandHud {
       ${cardsHtml}
       ${modalHtml}
     `;
+    this.applyHtml(nextHtml);
   }
 
   private renderDrawerPanel(): string {

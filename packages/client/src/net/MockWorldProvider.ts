@@ -36,6 +36,7 @@ export interface MockWorldProviderOptions {
   faction?: FactionId;
   autoStart?: boolean;
   tickRateHz?: number;
+  timeScale?: number;
 }
 
 function createMockUnit(params: {
@@ -119,6 +120,7 @@ function cloneUnit(unit: UnitEntity): UnitEntity {
 export class MockWorldProvider implements IWorldProvider {
   readonly faction: FactionId;
   private readonly tickRateHz: number;
+  private timeScale: number;
   private readonly listeners = new Set<SnapshotListener>();
 
   private tick = 0;
@@ -151,10 +153,27 @@ export class MockWorldProvider implements IWorldProvider {
   constructor(options: MockWorldProviderOptions = {}) {
     this.faction = options.faction ?? 'earth';
     this.tickRateHz = options.tickRateHz ?? SIM_TICK_RATE_HZ;
+    this.timeScale =
+      options.timeScale !== undefined &&
+      Number.isFinite(options.timeScale) &&
+      options.timeScale >= 0
+        ? options.timeScale
+        : 1.0;
     this.seedInitialState();
 
     if (options.autoStart) {
       this.start();
+    }
+  }
+
+  getTimeScale(): number {
+    return this.timeScale;
+  }
+
+  setTimeScale(scale: number): void {
+    if (Number.isFinite(scale) && scale >= 0) {
+      this.timeScale = scale;
+      this.emitSnapshot();
     }
   }
 
@@ -261,7 +280,9 @@ export class MockWorldProvider implements IWorldProvider {
     }
     const intervalMs = Math.max(16, Math.round(1000 / this.tickRateHz));
     this.timerId = setInterval(() => {
-      this.step(1 / this.tickRateHz);
+      if (this.timeScale > 0) {
+        this.step((1 / this.tickRateHz) * this.timeScale);
+      }
     }, intervalMs);
   }
 

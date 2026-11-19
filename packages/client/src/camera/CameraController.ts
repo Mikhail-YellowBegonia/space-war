@@ -60,7 +60,11 @@ export class CameraController {
 
     const steps = Math.max(-3, Math.min(3, delta / 100));
     const scaleFactor = Math.pow(CAMERA_LIMITS.zoomStepFactor, steps);
-    const anchor = this.getLocalPoint(event.clientX, event.clientY);
+    let anchor = this.getLocalPoint(event.clientX, event.clientY);
+    if (this.camera.getFollowTarget() !== null) {
+      const vp = this.camera.getViewport();
+      anchor = { x: vp.width * 0.5, y: vp.height * 0.5 };
+    }
     this.camera.zoomAtScreenPos(scaleFactor, anchor);
     this.onCameraChange?.();
   };
@@ -98,6 +102,7 @@ export class CameraController {
 
     if (Math.hypot(dx, dy) > 2) {
       this.dragMoved = true;
+      this.camera.clearFollowTarget();
     }
 
     this.lastClientX = event.clientX;

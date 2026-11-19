@@ -1,11 +1,12 @@
-import { SOLAR_SYSTEM_BODIES, type FactionId } from '@space-war/shared';
+import { SOLAR_SYSTEM_BODIES, getBodyStateAt, type FactionId } from '@space-war/shared';
 import { getClientBootBanner } from './app.js';
 import { CicSoundEngine } from './audio/index.js';
-import { Camera2D, CameraController } from './camera/index.js';
+import { Camera2D, CameraController, type CameraFollowTarget } from './camera/index.js';
 import {
   FireControlManager,
   LogisticsBuildController,
   OrbitInteractionManager,
+  pickEntityAtScreenPos,
 } from './interaction/index.js';
 import {
   MockWorldProvider,
@@ -93,6 +94,7 @@ function bootstrapClient(): void {
     mode: 'mock' | 'ws',
     roomId: string,
     faction: FactionId,
+    autoStartMock = true,
   ): {
     provider: IWorldProvider;
     interaction: OrbitInteractionManager;
@@ -120,7 +122,11 @@ function bootstrapClient(): void {
       };
     }
 
-    const mockProvider = new MockWorldProvider({ faction, autoStart: true });
+    const mockProvider = new MockWorldProvider({
+      faction,
+      autoStart: autoStartMock,
+      timeScale: 0.5,
+    });
     return {
       provider: mockProvider,
       interaction: new OrbitInteractionManager(mockProvider, SOLAR_SYSTEM_BODIES),
@@ -149,15 +155,21 @@ function bootstrapClient(): void {
     interaction.dispose();
     provider.dispose();
 
-    const next = createSession(nextMode, roomId, faction);
+    const next = createSession(nextMode, roomId, faction, true);
     provider = next.provider;
     interaction = next.interaction;
     fireControl = next.fireControl;
     logistics = next.logistics;
+    camera.clearFollowTarget();
     hud?.rebind(provider, interaction, buildConnectionConfig(), fireControl, logistics);
   };
 
-  const initialSession = createSession(currentMode, currentRoomId, currentFaction);
+  const initialSession = createSession(
+    currentMode,
+    currentRoomId,
+    currentFaction,
+    initial.skipLobby,
+  );
   provider = initialSession.provider;
   interaction = initialSession.interaction;
   fireControl = initialSession.fireControl;
@@ -186,9 +198,34 @@ function bootstrapClient(): void {
 
   syncCanvasSize();
 
+  const followEntity = (target: CameraFollowTarget | null, desiredSpanAu?: number): void => {
+    camera.setFollowTarget(target);
+    if (target && desiredSpanAu !== undefined && camera.getViewSpanAu() > desiredSpanAu) {
+      camera.setViewSpanAu(desiredSpanAu);
+    }
+    hud?.notifyCameraStateChange();
+  };
+
+  const toggleFollowSelectedUnit = (): void => {
+    const selected = interaction.getSelectedUnit();
+    const cur = camera.getFollowTarget();
+    if (!selected) {
+      followEntity(null);
+      return;
+    }
+    if (cur?.kind === 'unit' && cur.id === selected.id) {
+      followEntity(null);
+    } else {
+      followEntity({ kind: 'unit', id: selected.id, label: selected.id }, 0.85);
+    }
+  };
+
   const cameraController = new CameraController({
     element: canvas,
     camera,
+    onCameraChange: () => {
+      hud?.notifyCameraStateChange();
+    },
   });
 
   hud = hudRoot
@@ -201,12 +238,30 @@ function bootstrapClient(): void {
         matchFlow,
         soundEngine,
         onLaunchSession: switchConnectionMode,
-        onResetCamera: () => camera.resetOverview(),
+        onResetCamera: () => {
+          camera.resetOverview();
+          hud?.notifyCameraStateChange();
+        },
+        getFollowTarget: () => camera.getFollowTarget(),
+        onToggleFollowSelected: toggleFollowSelectedUnit,
+        onFollowBody: (bodyId, label) => {
+          followEntity({ kind: 'body', id: bodyId, label }, 1.4);
+        },
+        onClearFollow: () => {
+          followEntity(null);
+        },
+        getTimeScale: () =>
+          provider instanceof MockWorldProvider ? provider.getTimeScale() : 0.5,
+        onSetTimeScale: (scale) => {
+          if (provider instanceof MockWorldProvider) {
+            provider.setTimeScale(scale);
+          }
+        },
         connection: buildConnectionConfig(),
       })
     : null;
 
-  const getLocalPoint = (event: PointerEvent): { x: number; y: number } => {
+  const getLocalPoint = (event: MouseEvent): { x: number; y: number } => {
     const rect = canvas.getBoundingClientRect();
     return {
       x: event.clientX - rect.left,
@@ -267,6 +322,21 @@ function bootstrapClient(): void {
     interaction.endPointerAction();
   };
 
+  const handleDoubleClick = (event: MouseEvent): void => {
+    const local = getLocalPoint(event);
+    const snap = provider.getSnapshot();
+    const picked = pickEntityAtScreenPos(local, camera, snap, SOLAR_SYSTEM_BODIES, 22);
+    if (!picked) {
+      return;
+    }
+    if (picked.kind === 'unit') {
+      interaction.selectUnit(picked.unit.id);
+      followEntity({ kind: 'unit', id: picked.unit.id, label: picked.unit.id }, 0.8);
+    } else if (picked.kind === 'body') {
+      followEntity({ kind: 'body', id: picked.body.id, label: picked.body.name }, 1.4);
+    }
+  };
+
   const handleKeyDown = (event: KeyboardEvent): void => {
     const active = document.activeElement as HTMLElement | null;
     if (active && (active.tagName === 'INPUT' || active.tagName === 'SELECT')) {
@@ -274,6 +344,9 @@ function bootstrapClient(): void {
     }
     if (event.key === 'Home' || event.key === '0') {
       camera.resetOverview();
+      hud?.notifyCameraStateChange();
+    } else if (event.key === 't' || event.key === 'T') {
+      toggleFollowSelectedUnit();
     } else if (event.key === '1') {
       interaction.setMode('select');
     } else if (event.key === '2') {
@@ -302,6 +375,7 @@ function bootstrapClient(): void {
   };
 
   canvas.addEventListener('pointerdown', handlePointerDown);
+  canvas.addEventListener('dblclick', handleDoubleClick);
   window.addEventListener('pointermove', handlePointerMove);
   window.addEventListener('pointerup', handlePointerUp);
   window.addEventListener('pointercancel', handlePointerUp);
@@ -319,6 +393,7 @@ function bootstrapClient(): void {
     interaction.dispose();
     provider.dispose();
     canvas.removeEventListener('pointerdown', handlePointerDown);
+    canvas.removeEventListener('dblclick', handleDoubleClick);
     window.removeEventListener('pointermove', handlePointerMove);
     window.removeEventListener('pointerup', handlePointerUp);
     window.removeEventListener('pointercancel', handlePointerUp);
@@ -330,6 +405,29 @@ function bootstrapClient(): void {
 
   const renderLoop = (): void => {
     const snap = provider.getSnapshot();
+    const follow = camera.getFollowTarget();
+    if (follow) {
+      if (follow.kind === 'unit') {
+        const targetUnit = snap.ownUnits.find((u) => u.id === follow.id && u.hp > 0);
+        if (targetUnit) {
+          camera.setCenter(targetUnit.pos);
+        } else {
+          camera.clearFollowTarget();
+          hud?.notifyCameraStateChange();
+        }
+      } else {
+        const cel = snap.celestials.find((c) => c.id === follow.id);
+        if (cel) {
+          camera.setCenter(cel.pos);
+        } else {
+          const body = SOLAR_SYSTEM_BODIES.find((b) => b.id === follow.id);
+          if (body) {
+            camera.setCenter(getBodyStateAt(body, snap.gameTimeSec).pos);
+          }
+        }
+      }
+    }
+
     const uiState = interaction.getState();
     const fireState = fireControl.getState();
     const chosenOption = interaction.getSelectedOption();
@@ -370,7 +468,8 @@ function bootstrapClient(): void {
     if (banner) {
       const span = camera.getViewSpanAu().toFixed(2);
       const tier = camera.getSemanticZoomTier().toUpperCase();
-      banner.textContent = `${baseBanner} // SPAN ${span} AU [${tier}] // WHEEL ZOOM · RMB/MMB PAN`;
+      const lockBadge = follow ? ` // LOCK ${follow.label.toUpperCase()}` : '';
+      banner.textContent = `${baseBanner} // SPAN ${span} AU [${tier}]${lockBadge} // WHEEL ZOOM · RMB PAN · DBLCLICK FOLLOW`;
     }
 
     requestAnimationFrame(renderLoop);

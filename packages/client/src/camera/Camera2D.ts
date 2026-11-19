@@ -2,6 +2,10 @@ import type { Vec2 } from '@space-war/shared';
 
 export type SemanticZoomTier = 'strategic' | 'operational' | 'tactical';
 
+export type CameraFollowTarget =
+  | { kind: 'unit'; id: string; label: string }
+  | { kind: 'body'; id: string; label: string };
+
 export const CAMERA_LIMITS = {
   /** Tightest local rendezvous zoom: 0.05 AU across the smaller viewport dimension. */
   minViewSpanAu: 0.05,
@@ -62,6 +66,7 @@ export class Camera2D {
   private viewSpanAu: number;
   private viewportWidth: number;
   private viewportHeight: number;
+  private followTarget: CameraFollowTarget | null = null;
 
   constructor(options: Camera2DOptions = {}) {
     this.centerX = clamp(
@@ -201,10 +206,23 @@ export class Camera2D {
     };
   }
 
+  getFollowTarget(): CameraFollowTarget | null {
+    return this.followTarget ? { ...this.followTarget } : null;
+  }
+
+  setFollowTarget(target: CameraFollowTarget | null): void {
+    this.followTarget = target ? { ...target } : null;
+  }
+
+  clearFollowTarget(): void {
+    this.followTarget = null;
+  }
+
   /**
    * Resets to the full inner solar system overview centered on the Sun.
    */
   resetOverview(): void {
+    this.followTarget = null;
     this.centerX = 0;
     this.centerY = 0;
     this.viewSpanAu = CAMERA_LIMITS.maxViewSpanAu;

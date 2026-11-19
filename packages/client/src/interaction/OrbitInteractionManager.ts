@@ -16,6 +16,7 @@ import {
 import type { Camera2D } from '../camera/index.js';
 import type { IWorldProvider } from '../net/index.js';
 import {
+  buildOrbitFromApsides,
   buildOrbitFromTwoPointDrag,
   getOrbitApsisPositions,
   pickApsisHandleAtScreenPos,
@@ -74,6 +75,9 @@ export class OrbitInteractionManager {
 
   private activeDragHandle: ApsisHandleKind | null = null;
   private activeFreeDragAnchor: Vec2 | null = null;
+  private activeFreeDragStartScreen: Vec2 | null = null;
+  private activeFreeDragMoved = false;
+  private lastDragOptionRecomputeMs = 0;
 
   constructor(provider: IWorldProvider, bodies: readonly CelestialBody[] = SOLAR_SYSTEM_BODIES) {
     this.provider = provider;
@@ -202,14 +206,32 @@ export class OrbitInteractionManager {
     this.emitState();
   }
 
-  updateDraftOrbit(targetOrbit: KeplerOrbit): void {
+  updateDraftOrbit(targetOrbit: KeplerOrbit, deferOptionSolve = false): void {
     this.mode = 'orbit_insertion';
     this.interceptTarget = null;
     this.draftOrbit = { ...targetOrbit };
     this.pendingBingoConfirm = false;
     this.statusMessage = null;
-    this.recomputeOrbitOptions();
+    if (!deferOptionSolve || !this.options) {
+      this.recomputeOrbitOptions();
+    } else {
+      const nowMs = Date.now();
+      if (nowMs - this.lastDragOptionRecomputeMs >= 100) {
+        this.lastDragOptionRecomputeMs = nowMs;
+        this.recomputeOrbitOptions();
+      }
+    }
     this.emitState();
+  }
+
+  setCircularDraftOrbit(radiusAu: number, angleRad = 0): void {
+    this.updateDraftOrbit(buildOrbitFromApsides(radiusAu, radiusAu, angleRad, 0));
+  }
+
+  setDraftOrbitApsides(rpAu: number, raAu: number, omegaRad: number): void {
+    this.updateDraftOrbit(
+      buildOrbitFromApsides(rpAu, raAu, omegaRad, this.draftOrbit?.epochSec ?? 0),
+    );
   }
 
   setInterceptTarget(refId: string, label?: string): boolean {
@@ -237,6 +259,8 @@ export class OrbitInteractionManager {
     this.pendingBingoConfirm = false;
     this.activeDragHandle = null;
     this.activeFreeDragAnchor = null;
+    this.activeFreeDragStartScreen = null;
+    this.activeFreeDragMoved = false;
     this.emitState();
   }
 
@@ -254,14 +278,14 @@ export class OrbitInteractionManager {
       }
 
       if (this.draftOrbit) {
-        const handle = pickApsisHandleAtScreenPos(screenPos, camera, this.draftOrbit);
+        const handle = pickApsisHandleAtScreenPos(screenPos, camera, this.draftOrbit, 22);
         if (handle) {
           this.activeDragHandle = handle;
           return true;
         }
       }
 
-      // Allow picking another own unit by clicking directly on it; otherwise start free ellipse drag
+      // Allow picking another own unit by clicking directly on it; otherwise click sets circular orbit & drag stretches ellipse
       const picked = pickEntityAtScreenPos(screenPos, camera, this.snapshot, this.bodies);
       if (picked?.kind === 'unit') {
         this.selectUnit(picked.unit.id);
@@ -269,8 +293,12 @@ export class OrbitInteractionManager {
       }
 
       this.activeFreeDragAnchor = { ...unit.pos };
-      const dragWorld = camera.screenToWorld(screenPos);
-      this.updateDraftOrbit(buildOrbitFromTwoPointDrag(this.activeFreeDragAnchor, dragWorld));
+      this.activeFreeDragStartScreen = { ...screenPos };
+      this.activeFreeDragMoved = false;
+      const clickWorld = camera.screenToWorld(screenPos);
+      const clickRadius = Math.hypot(clickWorld.x, clickWorld.y);
+      const clickAngle = Math.atan2(clickWorld.y, clickWorld.x);
+      this.setCircularDraftOrbit(clickRadius, clickAngle);
       return true;
     }
 
@@ -314,12 +342,23 @@ export class OrbitInteractionManager {
     if (this.activeDragHandle && this.draftOrbit) {
       this.updateDraftOrbit(
         updateOrbitFromApsisHandleDrag(this.draftOrbit, this.activeDragHandle, cursorWorld),
+        true,
       );
       return true;
     }
 
     if (this.activeFreeDragAnchor) {
-      this.updateDraftOrbit(buildOrbitFromTwoPointDrag(this.activeFreeDragAnchor, cursorWorld));
+      if (!this.activeFreeDragMoved && this.activeFreeDragStartScreen) {
+        const movePx = Math.hypot(
+          screenPos.x - this.activeFreeDragStartScreen.x,
+          screenPos.y - this.activeFreeDragStartScreen.y,
+        );
+        if (movePx < 6) {
+          return true;
+        }
+        this.activeFreeDragMoved = true;
+      }
+      this.updateDraftOrbit(buildOrbitFromTwoPointDrag(this.activeFreeDragAnchor, cursorWorld), true);
       return true;
     }
 
@@ -327,8 +366,17 @@ export class OrbitInteractionManager {
   }
 
   endPointerAction(): void {
+    const hadDrag =
+      this.activeDragHandle !== null ||
+      (this.activeFreeDragAnchor !== null && this.activeFreeDragMoved);
     this.activeDragHandle = null;
     this.activeFreeDragAnchor = null;
+    this.activeFreeDragStartScreen = null;
+    this.activeFreeDragMoved = false;
+    if (hadDrag && this.mode === 'orbit_insertion' && this.draftOrbit) {
+      this.recomputeOrbitOptions();
+      this.emitState();
+    }
   }
 
   /**

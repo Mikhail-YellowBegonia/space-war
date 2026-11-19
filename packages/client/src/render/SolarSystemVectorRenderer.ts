@@ -1189,8 +1189,35 @@ export class SolarSystemVectorRenderer implements IRenderer {
     }
 
     if (apsisHandles) {
-      this.drawApsisHandle('P', apsisHandles.periapsis, camera, '#5ce1e6');
-      this.drawApsisHandle('A', apsisHandles.apoapsis, camera, '#ffd166');
+      const pScreen = camera.worldToScreen(apsisHandles.periapsis);
+      const aScreen = camera.worldToScreen(apsisHandles.apoapsis);
+      ctx.save();
+      ctx.strokeStyle = 'rgba(125, 249, 255, 0.28)';
+      ctx.lineWidth = 1;
+      ctx.setLineDash([4, 4]);
+      ctx.beginPath();
+      ctx.moveTo(pScreen.x, pScreen.y);
+      ctx.lineTo(aScreen.x, aScreen.y);
+      ctx.stroke();
+      ctx.restore();
+
+      const rpAu = Math.hypot(apsisHandles.periapsis.x, apsisHandles.periapsis.y);
+      const raAu = Math.hypot(apsisHandles.apoapsis.x, apsisHandles.apoapsis.y);
+
+      this.drawApsisHandle(
+        'P',
+        apsisHandles.periapsis,
+        camera,
+        '#5ce1e6',
+        `近日 P ${rpAu.toFixed(2)} AU`,
+      );
+      this.drawApsisHandle(
+        'A',
+        apsisHandles.apoapsis,
+        camera,
+        '#ffd166',
+        `远日 A ${raAu.toFixed(2)} AU`,
+      );
     }
   }
 
@@ -1199,23 +1226,30 @@ export class SolarSystemVectorRenderer implements IRenderer {
     worldPos: Vec2,
     camera: RenderFrameState['camera'],
     color: string,
+    caption?: string,
   ): void {
     const { ctx } = this;
     const screen = camera.worldToScreen(worldPos);
     ctx.save();
     ctx.fillStyle = '#050a0e';
     ctx.strokeStyle = color;
-    ctx.lineWidth = 1.8;
+    ctx.lineWidth = 2;
     ctx.beginPath();
-    ctx.arc(screen.x, screen.y, 8, 0, Math.PI * 2);
+    ctx.arc(screen.x, screen.y, 11, 0, Math.PI * 2);
     ctx.fill();
     ctx.stroke();
 
     ctx.fillStyle = color;
-    ctx.font = 'bold 10px ui-monospace, SFMono-Regular, Menlo, monospace';
+    ctx.font = 'bold 11px ui-monospace, SFMono-Regular, Menlo, monospace';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText(label, screen.x, screen.y + 0.5);
+
+    if (caption) {
+      ctx.font = '10px ui-monospace, SFMono-Regular, Menlo, monospace';
+      ctx.textAlign = 'left';
+      ctx.fillText(caption, screen.x + 14, screen.y);
+    }
     ctx.restore();
   }
 

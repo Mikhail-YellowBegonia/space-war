@@ -30,6 +30,7 @@ export type TickSystemHook = (ctx: TickSystemContext) => void;
 
 export interface SimulationLoopOptions {
   tickRateHz?: number;
+  timeScale?: number;
   systems?: TickSystemHook[];
   onTick?: (world: WorldState) => void;
 }
@@ -42,6 +43,7 @@ export class SimulationLoop {
   public readonly world: WorldState;
   public readonly tickRateHz: number;
   public readonly dtSec: number;
+  public readonly timeScale: number;
   public readonly irByUnit = new Map<string, number>();
   private readonly systems: TickSystemHook[];
   private postSensorCount = 1;
@@ -55,6 +57,10 @@ export class SimulationLoop {
     this.world = initialWorld;
     this.tickRateHz = options.tickRateHz ?? SIM_TICK_RATE_HZ;
     this.dtSec = 1 / this.tickRateHz;
+    this.timeScale =
+      options.timeScale !== undefined && Number.isFinite(options.timeScale) && options.timeScale > 0
+        ? options.timeScale
+        : 1.0;
     this.systems = [
       createEwTickSystem(),
       createMunitionTickSystem({
@@ -93,6 +99,7 @@ export class SimulationLoop {
 
   public stepTick(): void {
     const prevTimeSec = this.world.gameTimeSec;
+    const stepDtSec = this.dtSec * this.timeScale;
     this.world.vfxEvents = [];
     this.world.laserActiveUnitIds.clear();
 
@@ -101,7 +108,7 @@ export class SimulationLoop {
     for (const [unitId, unit] of this.world.units.entries()) {
       const thermalLocked = isUnitThermallyLockedOut(unit);
       const orbitInput = thermalLocked ? { ...unit, deltaV: 0 } : unit;
-      const result = advanceUnitOrbit(orbitInput, prevTimeSec, this.dtSec);
+      const result = advanceUnitOrbit(orbitInput, prevTimeSec, stepDtSec);
       const nextUnit = thermalLocked ? { ...result.unit, deltaV: unit.deltaV } : result.unit;
       this.world.units.set(unitId, nextUnit);
 
@@ -117,12 +124,12 @@ export class SimulationLoop {
     }
 
     this.world.tick += 1;
-    this.world.gameTimeSec = Number((this.world.tick * this.dtSec).toFixed(6));
+    this.world.gameTimeSec = Number((prevTimeSec + stepDtSec).toFixed(6));
 
     for (const system of this.systems) {
       system({
         world: this.world,
-        dtSec: this.dtSec,
+        dtSec: stepDtSec,
         usedDeltaVByUnit,
       });
     }

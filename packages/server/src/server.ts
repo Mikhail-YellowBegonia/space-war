@@ -9,6 +9,7 @@ import { WebSocket, WebSocketServer } from 'ws';
 import { RoomManager, type ClientConnection, type RoomManagerOptions } from './net/roomManager.js';
 
 export const DEFAULT_PORT = 3001;
+export const DEFAULT_LIVE_TIME_SCALE = 0.5;
 
 const CLIENT_DIST_DIR = fileURLToPath(new URL('../../client/dist', import.meta.url));
 
@@ -126,9 +127,15 @@ export function createSpaceWarServer(options: SpaceWarServerOptions = {}): Space
   const port = options.port ?? DEFAULT_PORT;
   const host = options.host ?? '127.0.0.1';
 
+  const autoStartLoop = options.roomManagerOptions?.autoStartLoop ?? true;
+  const timeScale =
+    options.roomManagerOptions?.timeScale ??
+    (autoStartLoop ? DEFAULT_LIVE_TIME_SCALE : 1.0);
+
   const roomManager = new RoomManager({
-    autoStartLoop: true,
     ...options.roomManagerOptions,
+    autoStartLoop,
+    timeScale,
   });
 
   const httpServer = createServer(handleHttpRequest);

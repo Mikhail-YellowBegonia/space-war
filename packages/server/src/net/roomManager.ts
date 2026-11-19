@@ -35,6 +35,7 @@ interface ClientSession {
 export interface RoomManagerOptions {
   autoStartLoop?: boolean;
   tickRateHz?: number;
+  timeScale?: number;
   systems?: TickSystemHook[];
 }
 
@@ -73,11 +74,16 @@ export class RoomManager {
   private readonly sessions = new Map<string, ClientSession>();
   private readonly autoStartLoop: boolean;
   private readonly tickRateHz: number;
+  private readonly timeScale: number;
   private readonly systems: TickSystemHook[];
 
   constructor(options: RoomManagerOptions = {}) {
     this.autoStartLoop = options.autoStartLoop ?? false;
     this.tickRateHz = options.tickRateHz ?? SIM_TICK_RATE_HZ;
+    this.timeScale =
+      options.timeScale !== undefined && Number.isFinite(options.timeScale) && options.timeScale > 0
+        ? options.timeScale
+        : 1.0;
     this.systems = [...(options.systems ?? [])];
   }
 
@@ -93,6 +99,7 @@ export class RoomManager {
 
     const loop = new SimulationLoop(createInitialWorldState(), {
       tickRateHz: this.tickRateHz,
+      timeScale: this.timeScale,
       systems: this.systems,
       onTick: () => {
         if (loop.isRunning()) {

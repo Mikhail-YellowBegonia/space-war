@@ -117,11 +117,70 @@
         color: #ffffff;
       }
 
-      .cic-netbar {
+      .cic-netbar,
+      .cic-subbar,
+      .cic-speedbar,
+      .cic-trackbar {
         display: flex;
         align-items: center;
         gap: 6px;
         flex-wrap: wrap;
+      }
+
+      .cic-speedbar,
+      .cic-trackbar {
+        font-size: 11px;
+        color: #9ad7df;
+        padding: 2px 6px;
+        border: 1px solid rgba(125, 249, 255, 0.2);
+        background: rgba(5, 10, 14, 0.8);
+      }
+
+      .cic-orbit-designer {
+        display: flex;
+        flex-direction: column;
+        gap: 5px;
+        padding: 7px 9px;
+        font-size: 11px;
+        background: rgba(5, 12, 18, 0.92);
+        border: 1px solid rgba(125, 249, 255, 0.35);
+        color: #c8f3f9;
+      }
+
+      .orbit-help-line b,
+      .orbit-step-line b {
+        color: #7df9ff;
+      }
+
+      .orbit-step-line {
+        font-size: 10px;
+        color: #9ad7df;
+      }
+
+      .orbit-preset-row {
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 4px;
+      }
+
+      .orbit-preset-row .cic-mini-btn {
+        margin-left: 0;
+      }
+
+      .orbit-sliders-row {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(120px, 1fr));
+        gap: 8px;
+        margin-top: 2px;
+      }
+
+      .orbit-slider-item {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        font-size: 10px;
+        color: #bfeef5;
       }
 
       .cic-input,
@@ -360,12 +419,13 @@
       .cic-drawer {
         left: 14px;
         right: auto;
-        top: 175px;
+        top: 192px;
         bottom: auto;
         width: min(450px, calc(100vw - 28px));
-        max-height: calc(100vh - 255px);
+        max-height: calc(100vh - 270px);
         overflow-y: auto;
         font-size: 11px;
+        z-index: 25;
       }
 
       .drawer-list,
