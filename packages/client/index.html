@@ -577,10 +577,110 @@
         justify-content: flex-end;
         gap: 8px;
       }
+
+      /* Retro CRT post-processing sits strictly between #viewport and #hud-root */
+      #viewport.crt-active {
+        filter: contrast(1.04) drop-shadow(0 0 2px rgba(92, 225, 230, 0.22));
+      }
+
+      #crt-overlay {
+        position: fixed;
+        inset: 0;
+        pointer-events: none;
+        z-index: 15;
+        background:
+          repeating-linear-gradient(
+            to bottom,
+            rgba(0, 0, 0, 0) 0px,
+            rgba(0, 0, 0, 0) 2px,
+            rgba(0, 12, 18, 0.24) 3px
+          ),
+          radial-gradient(
+            circle at center,
+            rgba(92, 225, 230, 0) 62%,
+            rgba(2, 6, 10, 0.58) 100%
+          );
+      }
+
+      #crt-overlay.crt-off {
+        display: none;
+      }
+
+      .cic-lobby-backdrop {
+        background: rgba(3, 8, 12, 0.78);
+      }
+
+      .cic-lobby-card {
+        width: min(520px, calc(100vw - 32px));
+        border-color: #5ce1e6;
+        color: #d7f9ff;
+      }
+
+      .lobby-header {
+        font-size: 16px;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        color: #7df9ff;
+      }
+
+      .lobby-subtitle {
+        font-size: 11px;
+        color: #93cfd8;
+        margin: 4px 0 14px;
+      }
+
+      .lobby-section {
+        margin-bottom: 12px;
+      }
+
+      .lobby-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-top: 5px;
+      }
+
+      .lobby-room-input {
+        width: 180px;
+        margin-top: 5px;
+        padding: 5px 8px;
+      }
+
+      .lobby-footer {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-top: 16px;
+        padding-top: 12px;
+        border-top: 1px solid rgba(125, 249, 255, 0.2);
+      }
+
+      .lobby-toggles {
+        display: flex;
+        gap: 6px;
+      }
+
+      .victory-card {
+        border-color: #4ade80;
+        color: #e6fff0;
+      }
+
+      .victory-title {
+        color: #4ade80;
+      }
+
+      .victory-stats {
+        display: grid;
+        grid-template-columns: repeat(2, 1fr);
+        gap: 6px 12px;
+        font-size: 12px;
+        margin-bottom: 16px;
+      }
     </style>
   </head>
   <body>
     <canvas id="viewport"></canvas>
+    <div id="crt-overlay"></div>
     <div id="hud-boot">INITIALIZING CIC...</div>
     <div id="hud-root"></div>
     <script type="module" src="/src/main.ts"></script>
