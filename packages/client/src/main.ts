@@ -1,10 +1,31 @@
-import { SOLAR_SYSTEM_BODIES } from '@space-war/shared';
+import { SOLAR_SYSTEM_BODIES, type FactionId } from '@space-war/shared';
 import { getClientBootBanner } from './app.js';
 import { Camera2D, CameraController } from './camera/index.js';
 import { OrbitInteractionManager } from './interaction/index.js';
-import { MockWorldProvider } from './net/index.js';
+import {
+  MockWorldProvider,
+  WsWorldProvider,
+  type IWorldProvider,
+} from './net/index.js';
 import { SolarSystemVectorRenderer } from './render/index.js';
-import { OrbitCommandHud } from './ui/index.js';
+import { OrbitCommandHud, type HudConnectionConfig } from './ui/index.js';
+
+function resolveDefaultWsUrl(): string {
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  return `${protocol}//${window.location.host}/ws`;
+}
+
+function parseInitialConnectionParams(): {
+  mode: 'mock' | 'ws';
+  roomId: string;
+  faction: FactionId;
+} {
+  const params = new URLSearchParams(window.location.search);
+  const mode = params.get('mode') === 'ws' ? 'ws' : 'mock';
+  const roomId = params.get('room')?.trim() || 'alpha-1';
+  const faction: FactionId = params.get('faction') === 'mars' ? 'mars' : 'earth';
+  return { mode, roomId, faction };
+}
 
 function bootstrapClient(): void {
   const banner = document.getElementById('hud-boot');
@@ -23,8 +44,74 @@ function bootstrapClient(): void {
     return;
   }
 
-  const provider = new MockWorldProvider({ faction: 'earth', autoStart: true });
-  const interaction = new OrbitInteractionManager(provider, SOLAR_SYSTEM_BODIES);
+  const initial = parseInitialConnectionParams();
+  let currentMode: 'mock' | 'ws' = initial.mode;
+  let currentRoomId = initial.roomId;
+  let currentFaction: FactionId = initial.faction;
+
+  let provider: IWorldProvider;
+  let interaction: OrbitInteractionManager;
+  let unsubWsStatus: (() => void) | null = null;
+  let hud: OrbitCommandHud | null = null;
+
+  const createSession = (
+    mode: 'mock' | 'ws',
+    roomId: string,
+    faction: FactionId,
+  ): { provider: IWorldProvider; interaction: OrbitInteractionManager } => {
+    currentMode = mode;
+    currentRoomId = roomId;
+    currentFaction = faction;
+
+    if (mode === 'ws') {
+      const wsProvider = new WsWorldProvider({
+        url: resolveDefaultWsUrl(),
+        roomId,
+        preferredFaction: faction,
+      });
+      unsubWsStatus = wsProvider.onStatusChange((statusInfo) => {
+        hud?.updateConnectionStatus(statusInfo);
+      });
+      return {
+        provider: wsProvider,
+        interaction: new OrbitInteractionManager(wsProvider, SOLAR_SYSTEM_BODIES),
+      };
+    }
+
+    const mockProvider = new MockWorldProvider({ faction, autoStart: true });
+    return {
+      provider: mockProvider,
+      interaction: new OrbitInteractionManager(mockProvider, SOLAR_SYSTEM_BODIES),
+    };
+  };
+
+  const buildConnectionConfig = (): HudConnectionConfig => ({
+    mode: currentMode,
+    roomId: currentRoomId,
+    preferredFaction: currentFaction,
+    wsStatus: provider instanceof WsWorldProvider ? provider.getStatusInfo() : null,
+    onSwitchMode: switchConnectionMode,
+  });
+
+  const switchConnectionMode = (
+    nextMode: 'mock' | 'ws',
+    roomId: string,
+    faction: FactionId,
+  ): void => {
+    unsubWsStatus?.();
+    unsubWsStatus = null;
+    interaction.dispose();
+    provider.dispose();
+
+    const next = createSession(nextMode, roomId, faction);
+    provider = next.provider;
+    interaction = next.interaction;
+    hud?.rebind(provider, interaction, buildConnectionConfig());
+  };
+
+  const initialSession = createSession(currentMode, currentRoomId, currentFaction);
+  provider = initialSession.provider;
+  interaction = initialSession.interaction;
 
   const camera = new Camera2D({
     center: { x: 0, y: 0 },
@@ -54,12 +141,13 @@ function bootstrapClient(): void {
     camera,
   });
 
-  const hud = hudRoot
+  hud = hudRoot
     ? new OrbitCommandHud({
         root: hudRoot,
         provider,
         interaction,
         onResetCamera: () => camera.resetOverview(),
+        connection: buildConnectionConfig(),
       })
     : null;
 
@@ -96,6 +184,10 @@ function bootstrapClient(): void {
   };
 
   const handleKeyDown = (event: KeyboardEvent): void => {
+    const active = document.activeElement as HTMLElement | null;
+    if (active && (active.tagName === 'INPUT' || active.tagName === 'SELECT')) {
+      return;
+    }
     if (event.key === 'Home' || event.key === '0') {
       camera.resetOverview();
     } else if (event.key === '1') {
@@ -122,6 +214,7 @@ function bootstrapClient(): void {
   window.addEventListener('resize', syncCanvasSize);
   window.addEventListener('keydown', handleKeyDown);
   window.addEventListener('beforeunload', () => {
+    unsubWsStatus?.();
     cameraController.dispose();
     hud?.dispose();
     interaction.dispose();

@@ -92,6 +92,13 @@ export class OrbitInteractionManager {
         this.selectedUnitId = null;
         this.clearPreview();
       }
+      if (!this.selectedUnitId && snap.ownUnits.length > 0) {
+        const autoPick =
+          snap.ownUnits.find(
+            (u) => UNIT_CONFIGS[u.kind].maxDeltaV > 0 && u.kind !== 'home_base',
+          ) ?? snap.ownUnits[0];
+        this.selectedUnitId = autoPick?.id ?? null;
+      }
       this.emitState();
     });
   }
