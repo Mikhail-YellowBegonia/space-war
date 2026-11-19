@@ -6,6 +6,7 @@ import type {
   TransferOption,
   UnitEntity,
   Vec2,
+  VfxEvent,
 } from '@space-war/shared';
 import type { Camera2D } from '../camera/index.js';
 import type { EngagementAdvisory, ScreenBoxRect } from '../interaction/fireControlMath.js';
@@ -66,6 +67,7 @@ export interface RenderFrameState {
   previewTransfer?: TransferPreviewRenderData | null;
   boxSelectRect?: ScreenBoxRect | null;
   engagementAdvisories?: readonly EngagementAdvisory[];
+  vfxEvents?: readonly VfxEvent[];
 }
 
 export interface IRenderer {

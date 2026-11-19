@@ -282,6 +282,7 @@ function bootstrapClient(): void {
       focusedBodyId: uiState.interceptTarget?.refId ?? null,
       boxSelectRect: fireState.boxSelectRect,
       engagementAdvisories: fireState.advisories,
+      vfxEvents: snap.vfxEvents,
       previewTransfer: chosenOption
         ? {
             option: chosenOption,

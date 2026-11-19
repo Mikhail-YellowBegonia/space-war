@@ -33,6 +33,14 @@ import {
   formatGhostLostTimer,
   sampleErrorEllipsePoints,
 } from './situationalAwareness.js';
+import {
+  MUNITION_PIXEL_SPRITES,
+  UNIT_PIXEL_SPRITES,
+  getUnitSpritePalette,
+  type PixelSpriteDefinition,
+  type PixelSpritePalette,
+} from './pixelSprites.js';
+import { PixelVfxSystem } from './PixelVfxSystem.js';
 
 const CIC_COLORS = {
   background: '#050a0e',
@@ -87,9 +95,15 @@ function propulsionCode(propulsion: UnitEntity['propulsion']): string {
 export class SolarSystemVectorRenderer implements IRenderer {
   private readonly ctx: Canvas2DContextLike;
   private readonly orbitCache = new Map<string, Vec2[]>();
+  private readonly vfxSystem = new PixelVfxSystem();
+  private lastFrameTimeSec: number | null = null;
 
   constructor(ctx: Canvas2DContextLike) {
     this.ctx = ctx;
+  }
+
+  getVfxSystem(): PixelVfxSystem {
+    return this.vfxSystem;
   }
 
   render(frame: RenderFrameState): void {
@@ -97,6 +111,20 @@ export class SolarSystemVectorRenderer implements IRenderer {
     const { viewportWidth: w, viewportHeight: h, camera } = frame;
     const tier = camera.getSemanticZoomTier();
     const pixelsPerAu = camera.getPixelsPerAu();
+
+    // Update particle & beam VFX simulation
+    const dtSec =
+      this.lastFrameTimeSec === null
+        ? 0.016
+        : Math.max(0, Math.min(0.25, frame.gameTimeSec - this.lastFrameTimeSec));
+    this.lastFrameTimeSec = frame.gameTimeSec;
+    if (frame.vfxEvents && frame.vfxEvents.length > 0 && dtSec > 0) {
+      this.vfxSystem.ingestVfxEvents(frame.vfxEvents);
+    }
+    if (dtSec > 0) {
+      this.emitActiveThrusterPlumes(frame);
+      this.vfxSystem.step(dtSec);
+    }
 
     // 1. Background
     ctx.save();
@@ -184,10 +212,13 @@ export class SolarSystemVectorRenderer implements IRenderer {
     if (frame.ownMunitions) {
       for (const mun of frame.ownMunitions) {
         if (!mun.intercepted) {
-          this.drawMunitionMarker(mun, frame);
+          this.drawMunitionMarker(mun, frame, tier);
         }
       }
     }
+
+    // 7b-3. Direct pixel particles & pulse laser beams
+    this.vfxSystem.render(ctx, camera, w, h);
 
     // 7b-3. Close-range brawl & incoming munition advisories
     if (frame.engagementAdvisories && frame.engagementAdvisories.length > 0) {
@@ -504,8 +535,23 @@ export class SolarSystemVectorRenderer implements IRenderer {
       ctx.restore();
     }
 
-    // Distinct CIC vector glyph by UnitKind
-    this.strokeUnitGlyph(unit.kind, screenPos.x, screenPos.y, size);
+    // Distinct CIC vector glyph in strategic zoom; oriented pixel sprite with thermal radiator glow closer in
+    if (tier === 'strategic') {
+      this.strokeUnitGlyph(unit.kind, screenPos.x, screenPos.y, size);
+    } else {
+      const sprite = UNIT_PIXEL_SPRITES[unit.kind];
+      const heatRatio = unit.maxHeat > 0 ? unit.heat / unit.maxHeat : 0;
+      const palette = getUnitSpritePalette(
+        unit.faction,
+        heatRatio,
+        unit.radiatorsOpen,
+        unit.emconSilent,
+      );
+      const speed = Math.hypot(unit.vel.x, unit.vel.y);
+      const heading = speed > 1e-8 ? Math.atan2(unit.vel.y, unit.vel.x) : 0;
+      const pxScale = tier === 'tactical' ? 2.5 : 1.75;
+      this.drawPixelSprite(sprite, screenPos.x, screenPos.y, heading, pxScale, palette);
+    }
 
     if (isSelected) {
       ctx.strokeStyle = CIC_COLORS.selectedRing;
@@ -1159,7 +1205,11 @@ export class SolarSystemVectorRenderer implements IRenderer {
     ctx.restore();
   }
 
-  private drawMunitionMarker(mun: MunitionEntity, frame: RenderFrameState): void {
+  private drawMunitionMarker(
+    mun: MunitionEntity,
+    frame: RenderFrameState,
+    tier: SemanticZoomTier,
+  ): void {
     const { ctx } = this;
     const { camera, viewportWidth: w, viewportHeight: h } = frame;
     const screen = camera.worldToScreen(mun.pos);
@@ -1170,6 +1220,19 @@ export class SolarSystemVectorRenderer implements IRenderer {
     const speed = Math.hypot(mun.vel.x, mun.vel.y);
     const ux = speed > 1e-8 ? mun.vel.x / speed : 1;
     const uy = speed > 1e-8 ? mun.vel.y / speed : 0;
+
+    if (tier !== 'strategic') {
+      const heading = Math.atan2(uy, ux);
+      const sprite = MUNITION_PIXEL_SPRITES[mun.profileId];
+      const palette: PixelSpritePalette = {
+        hull: mun.coldCoast ? '#4a7a8c' : '#ffd166',
+        accent: '#ff9f1c',
+        radiator: '#ff4d4f',
+        core: mun.coldCoast ? '#7df9ff' : '#ffffff',
+      };
+      this.drawPixelSprite(sprite, screen.x, screen.y, heading, tier === 'tactical' ? 2.2 : 1.5, palette);
+      return;
+    }
 
     ctx.save();
     ctx.strokeStyle = mun.coldCoast ? '#7df9ff' : '#ffd166';
@@ -1188,6 +1251,72 @@ export class SolarSystemVectorRenderer implements IRenderer {
       ctx.moveTo(screen.x - ux * 4, screen.y - uy * 4);
       ctx.lineTo(screen.x - ux * 11, screen.y - uy * 11);
       ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  private emitActiveThrusterPlumes(frame: RenderFrameState): void {
+    const t = frame.gameTimeSec;
+    for (const unit of frame.units) {
+      if (unit.hp <= 0 || unit.deltaV <= 0 || unit.subsystems.propulsion === 'offline') continue;
+      const activeBurn = unit.plannedBurns.find(
+        (b) => t >= b.executeAtSec - 0.1 && t <= b.executeAtSec + Math.max(0.35, b.durationSec),
+      );
+      if (!activeBurn) continue;
+      const dvLen = Math.hypot(activeBurn.deltaV.x, activeBurn.deltaV.y);
+      const exhaustDir =
+        dvLen > 1e-8
+          ? { x: -activeBurn.deltaV.x / dvLen, y: -activeBurn.deltaV.y / dvLen }
+          : { x: -1, y: 0 };
+      const heatRatio = unit.maxHeat > 0 ? unit.heat / unit.maxHeat : 0;
+      this.vfxSystem.emitThrusterPlume(unit.pos, exhaustDir, unit.propulsion, heatRatio, 1);
+    }
+
+    if (frame.ownMunitions) {
+      for (const mun of frame.ownMunitions) {
+        if (mun.intercepted || mun.coldCoast || mun.deltaV <= 0) continue;
+        const speed = Math.hypot(mun.vel.x, mun.vel.y);
+        const exhaustDir =
+          speed > 1e-8 ? { x: -mun.vel.x / speed, y: -mun.vel.y / speed } : { x: -1, y: 0 };
+        this.vfxSystem.emitThrusterPlume(mun.pos, exhaustDir, 'chemical', 0.6, 0.8);
+      }
+    }
+  }
+
+  private drawPixelSprite(
+    sprite: PixelSpriteDefinition,
+    cx: number,
+    cy: number,
+    headingRad: number,
+    pixelSize: number,
+    palette: PixelSpritePalette,
+  ): void {
+    const { ctx } = this;
+    const cosH = Math.cos(headingRad);
+    const sinH = Math.sin(headingRad);
+    const halfW = (sprite.width - 1) * 0.5;
+    const halfH = (sprite.height - 1) * 0.5;
+    const block = Math.max(1, Math.round(pixelSize));
+
+    ctx.save();
+    for (let row = 0; row < sprite.height; row++) {
+      const line = sprite.rows[row];
+      if (!line) continue;
+      const ly = (row - halfH) * pixelSize;
+      for (let col = 0; col < sprite.width; col++) {
+        const ch = line[col];
+        if (!ch || ch === '.') continue;
+        const lx = (col - halfW) * pixelSize;
+
+        if (ch === 'H') ctx.fillStyle = palette.hull;
+        else if (ch === 'A') ctx.fillStyle = palette.accent;
+        else if (ch === 'R') ctx.fillStyle = palette.radiator;
+        else ctx.fillStyle = palette.core;
+
+        const rx = lx * cosH - ly * sinH;
+        const ry = lx * sinH + ly * cosH;
+        ctx.fillRect(Math.round(cx + rx - block * 0.5), Math.round(cy + ry - block * 0.5), block, block);
+      }
     }
     ctx.restore();
   }
