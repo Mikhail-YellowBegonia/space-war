@@ -1,12 +1,15 @@
 import type {
   CelestialBody,
+  FactionId,
   KeplerOrbit,
+  LogisticsRoute,
   MunitionEntity,
   SensorTrack,
   TransferOption,
   UnitEntity,
   Vec2,
   VfxEvent,
+  WonderSlot,
 } from '@space-war/shared';
 import type { Camera2D } from '../camera/index.js';
 import type { EngagementAdvisory, ScreenBoxRect } from '../interaction/fireControlMath.js';
@@ -68,6 +71,9 @@ export interface RenderFrameState {
   boxSelectRect?: ScreenBoxRect | null;
   engagementAdvisories?: readonly EngagementAdvisory[];
   vfxEvents?: readonly VfxEvent[];
+  faction?: FactionId;
+  ownWonder?: readonly WonderSlot[];
+  routes?: readonly LogisticsRoute[];
 }
 
 export interface IRenderer {

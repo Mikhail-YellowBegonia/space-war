@@ -6,11 +6,13 @@ import {
   type CelestialBody,
   type FactionId,
   type KeplerOrbit,
+  type LogisticsRoute,
   type MunitionEntity,
   type SensorTrack,
   type UnitEntity,
   type UnitKind,
   type Vec2,
+  type WonderSlot,
 } from '@space-war/shared';
 import type { SemanticZoomTier } from '../camera/index.js';
 import type {
@@ -41,6 +43,7 @@ import {
   type PixelSpritePalette,
 } from './pixelSprites.js';
 import { PixelVfxSystem } from './PixelVfxSystem.js';
+import { computeCoOrbitalWonderNodes } from './wonderRing.js';
 
 const CIC_COLORS = {
   background: '#050a0e',
@@ -175,6 +178,17 @@ export class SolarSystemVectorRenderer implements IRenderer {
     // 5. Active sensor / EW emission envelopes (LADAR scan cones & RF jammers)
     for (const unit of frame.units) {
       this.drawUnitSensorAndEwOverlays(unit, frame, pixelsPerAu);
+    }
+
+    // 5b. Logistics route lanes and detour waypoints
+    if (frame.routes && frame.routes.length > 0) {
+      this.drawLogisticsRoutes(frame.routes, bodyStates, frame);
+    }
+
+    // 5c. 16-slot co-orbital wonder ring nodes
+    if (frame.ownWonder && frame.ownWonder.length > 0) {
+      const wonderFaction = frame.faction ?? frame.units[0]?.faction ?? 'earth';
+      this.drawWonderRingNodes(wonderFaction, frame.ownWonder, frame);
     }
 
     // 6. Celestial bodies (Sun + 10 planets/asteroids)
@@ -1362,6 +1376,132 @@ export class SolarSystemVectorRenderer implements IRenderer {
     ctx.setLineDash([4, 3]);
     ctx.fillRect(x, y, w, h);
     ctx.strokeRect(x, y, w, h);
+    ctx.restore();
+  }
+
+  private drawLogisticsRoutes(
+    routes: readonly LogisticsRoute[],
+    bodyStates: ReadonlyMap<string, { pos: Vec2; vel: Vec2 }>,
+    frame: RenderFrameState,
+  ): void {
+    const { ctx } = this;
+    const { camera, viewportWidth: w, viewportHeight: h } = frame;
+    const unitById = new Map(frame.units.map((u) => [u.id, u]));
+
+    for (const route of routes) {
+      const src = bodyStates.get(route.sourceBodyId)?.pos;
+      const dstUnit = unitById.get(route.targetId)?.pos;
+      const dstBody = bodyStates.get(route.targetId)?.pos;
+      const dst = dstUnit ?? dstBody;
+      if (!src || !dst) continue;
+
+      const ptsWorld = route.detourWaypoint ? [src, route.detourWaypoint, dst] : [src, dst];
+      const ptsScreen = ptsWorld.map((p) => camera.worldToScreen(p));
+
+      ctx.save();
+      ctx.strokeStyle = route.paused
+        ? 'rgba(150, 165, 175, 0.25)'
+        : route.transferMode === 'stealth'
+          ? 'rgba(155, 140, 255, 0.32)'
+          : 'rgba(92, 225, 230, 0.28)';
+      ctx.lineWidth = 1.2;
+      ctx.setLineDash(route.paused ? [2, 6] : [6, 5]);
+      ctx.beginPath();
+      for (let i = 0; i < ptsScreen.length - 1; i++) {
+        const clipped = clipSegmentToRect(ptsScreen[i]!, ptsScreen[i + 1]!, 0, 0, w, h);
+        if (clipped) {
+          ctx.moveTo(clipped[0].x, clipped[0].y);
+          ctx.lineTo(clipped[1].x, clipped[1].y);
+        }
+      }
+      ctx.stroke();
+
+      if (route.detourWaypoint) {
+        const wpScreen = ptsScreen[1]!;
+        ctx.setLineDash([]);
+        ctx.fillStyle = '#050a0e';
+        ctx.strokeStyle = '#ffd166';
+        ctx.lineWidth = 1.4;
+        ctx.beginPath();
+        ctx.moveTo(wpScreen.x, wpScreen.y - 5);
+        ctx.lineTo(wpScreen.x + 5, wpScreen.y);
+        ctx.lineTo(wpScreen.x, wpScreen.y + 5);
+        ctx.lineTo(wpScreen.x - 5, wpScreen.y);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+
+        ctx.fillStyle = '#ffd166';
+        ctx.font = '9px ui-monospace, SFMono-Regular, Menlo, monospace';
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(`WP:${route.id}`, wpScreen.x + 7, wpScreen.y);
+      }
+      ctx.restore();
+    }
+  }
+
+  private drawWonderRingNodes(
+    faction: FactionId,
+    wonderSlots: readonly WonderSlot[],
+    frame: RenderFrameState,
+  ): void {
+    const { ctx } = this;
+    const { camera, viewportWidth: w, viewportHeight: h, gameTimeSec } = frame;
+    const nodes = computeCoOrbitalWonderNodes(faction, wonderSlots, gameTimeSec);
+    const baseColor = factionColor(faction);
+
+    ctx.save();
+    for (const node of nodes) {
+      const screen = camera.worldToScreen(node.pos);
+      if (screen.x < -16 || screen.x > w + 16 || screen.y < -16 || screen.y > h + 16) {
+        continue;
+      }
+
+      const { status, progressOre, requiredOre } = node.slot;
+      if (status === 'empty') {
+        ctx.strokeStyle = baseColor;
+        ctx.globalAlpha = 0.28;
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.arc(screen.x, screen.y, 3.2, 0, Math.PI * 2);
+        ctx.stroke();
+      } else if (status === 'building') {
+        const ratio = requiredOre > 0 ? Math.max(0.1, Math.min(1, progressOre / requiredOre)) : 0.5;
+        ctx.globalAlpha = 0.85;
+        ctx.strokeStyle = '#ffd166';
+        ctx.lineWidth = 1.6;
+        ctx.beginPath();
+        ctx.arc(screen.x, screen.y, 4.5, -Math.PI * 0.5, -Math.PI * 0.5 + Math.PI * 2 * ratio);
+        ctx.stroke();
+        ctx.fillStyle = '#ffd166';
+        ctx.fillRect(screen.x - 1.5, screen.y - 1.5, 3, 3);
+      } else if (status === 'complete') {
+        ctx.globalAlpha = 0.95;
+        ctx.fillStyle = baseColor;
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(screen.x, screen.y - 5);
+        ctx.lineTo(screen.x + 5, screen.y);
+        ctx.lineTo(screen.x, screen.y + 5);
+        ctx.lineTo(screen.x - 5, screen.y);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+      } else {
+        // damaged_halted
+        ctx.globalAlpha = 0.95;
+        ctx.strokeStyle = '#ff4d4f';
+        ctx.lineWidth = 1.6;
+        ctx.beginPath();
+        ctx.moveTo(screen.x - 4, screen.y - 4);
+        ctx.lineTo(screen.x + 4, screen.y + 4);
+        ctx.moveTo(screen.x + 4, screen.y - 4);
+        ctx.lineTo(screen.x - 4, screen.y + 4);
+        ctx.stroke();
+      }
+    }
     ctx.restore();
   }
 }

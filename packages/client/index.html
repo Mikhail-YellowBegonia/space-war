@@ -357,6 +357,83 @@
         gap: 8px;
       }
 
+      .cic-drawer {
+        left: 14px;
+        right: auto;
+        top: 175px;
+        bottom: auto;
+        width: min(450px, calc(100vw - 28px));
+        max-height: calc(100vh - 255px);
+        overflow-y: auto;
+        font-size: 11px;
+      }
+
+      .drawer-list,
+      .build-list {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        margin-top: 6px;
+      }
+
+      .drawer-card {
+        border: 1px solid rgba(125, 249, 255, 0.25);
+        background: rgba(8, 18, 26, 0.9);
+        padding: 7px 8px;
+      }
+
+      .drawer-actions,
+      .drawer-escorts {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px;
+        align-items: center;
+        margin-top: 5px;
+      }
+
+      .cic-drawer .cic-mini-btn {
+        margin-left: 0;
+      }
+
+      .wonder-grid {
+        display: grid;
+        grid-template-columns: repeat(8, 1fr);
+        gap: 4px;
+        margin: 6px 0;
+      }
+
+      .wonder-cell {
+        text-align: center;
+        padding: 3px 0;
+        font-size: 10px;
+        border: 1px solid rgba(125, 249, 255, 0.25);
+        color: #8ab4be;
+      }
+
+      .wonder-complete {
+        background: rgba(92, 225, 230, 0.25);
+        border-color: #5ce1e6;
+        color: #ffffff;
+        font-weight: 700;
+      }
+
+      .wonder-building {
+        background: rgba(255, 209, 102, 0.2);
+        border-color: #ffd166;
+        color: #ffd166;
+      }
+
+      .wonder-damaged_halted {
+        background: rgba(255, 77, 79, 0.25);
+        border-color: #ff4d4f;
+        color: #ff9999;
+      }
+
+      .build-item-btn {
+        text-align: left;
+        padding: 4px 8px;
+      }
+
       .panel-title {
         display: flex;
         justify-content: space-between;

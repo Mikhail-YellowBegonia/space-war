@@ -1,6 +1,9 @@
 import {
+  LOGISTICS_CONFIG,
   MUNITION_CONFIGS,
   UNIT_CONFIGS,
+  WONDER_CONFIG,
+  type BuildQueueKind,
   type FactionId,
   type FactionSnapshot,
   type MunitionProfileId,
@@ -9,9 +12,12 @@ import {
 } from '@space-war/shared';
 import {
   FireControlManager,
+  LogisticsBuildController,
+  getBuildCatalog,
   isTrackTargetableForFire,
   type CommandInteractionMode,
   type FireControlState,
+  type LogisticsUiState,
   type OrbitInteractionManager,
   type OrbitInteractionState,
 } from '../interaction/index.js';
@@ -41,6 +47,7 @@ export interface OrbitCommandHudOptions {
   provider: IWorldProvider;
   interaction: OrbitInteractionManager;
   fireControl?: FireControlManager;
+  logistics?: LogisticsBuildController;
   onResetCamera?: () => void;
   connection?: HudConnectionConfig;
 }
@@ -63,12 +70,16 @@ function propulsionBadge(unit: UnitEntity): string {
  * CIC command HUD overlay for unit selection, explicit Orbit/Intercept mode switching,
  * 3-plan transfer comparison cards, and Bingo delta-v red-line confirmation modal.
  */
+export type ActiveDrawerTab = 'none' | 'logistics' | 'build';
+
 export class OrbitCommandHud {
   private readonly root: HTMLElement;
   private provider: IWorldProvider;
   private interaction: OrbitInteractionManager;
   private fireControl: FireControlManager;
   private readonly ownsFireControl: boolean;
+  private logistics: LogisticsBuildController;
+  private readonly ownsLogistics: boolean;
   private readonly unitController: UnitControlPanelController;
   private readonly onResetCamera?: () => void;
   private connection?: HudConnectionConfig;
@@ -76,9 +87,12 @@ export class OrbitCommandHud {
   private snapshot: FactionSnapshot;
   private interactionState: OrbitInteractionState;
   private fireState: FireControlState;
+  private logisticsState: LogisticsUiState;
+  private activeDrawer: ActiveDrawerTab = 'none';
   private unsubProvider: () => void;
   private unsubInteraction: () => void;
   private unsubFireControl: () => void;
+  private unsubLogistics: () => void;
 
   constructor(options: OrbitCommandHudOptions) {
     this.root = options.root;
@@ -86,6 +100,8 @@ export class OrbitCommandHud {
     this.interaction = options.interaction;
     this.ownsFireControl = !options.fireControl;
     this.fireControl = options.fireControl ?? new FireControlManager(this.provider);
+    this.ownsLogistics = !options.logistics;
+    this.logistics = options.logistics ?? new LogisticsBuildController(this.provider);
     this.unitController = new UnitControlPanelController(this.provider);
     this.onResetCamera = options.onResetCamera;
     this.connection = options.connection;
@@ -93,6 +109,7 @@ export class OrbitCommandHud {
     this.snapshot = this.provider.getSnapshot();
     this.interactionState = this.interaction.getState();
     this.fireState = this.fireControl.getState();
+    this.logisticsState = this.logistics.getState();
 
     this.root.addEventListener('click', this.handleClick);
     this.root.addEventListener('change', this.handleInputChange);
@@ -108,6 +125,10 @@ export class OrbitCommandHud {
       this.fireState = state;
       this.render();
     });
+    this.unsubLogistics = this.logistics.subscribe((state) => {
+      this.logisticsState = state;
+      this.render();
+    });
 
     this.render();
   }
@@ -120,10 +141,12 @@ export class OrbitCommandHud {
     interaction: OrbitInteractionManager,
     connection?: HudConnectionConfig,
     fireControl?: FireControlManager,
+    logistics?: LogisticsBuildController,
   ): void {
     this.unsubProvider();
     this.unsubInteraction();
     this.unsubFireControl();
+    this.unsubLogistics();
     this.provider = provider;
     this.interaction = interaction;
     if (fireControl) {
@@ -131,12 +154,18 @@ export class OrbitCommandHud {
     } else {
       this.fireControl.setProvider(provider);
     }
+    if (logistics) {
+      this.logistics = logistics;
+    } else {
+      this.logistics.setProvider(provider);
+    }
     this.unitController.setProvider(provider);
     this.connection = connection;
 
     this.snapshot = this.provider.getSnapshot();
     this.interactionState = this.interaction.getState();
     this.fireState = this.fireControl.getState();
+    this.logisticsState = this.logistics.getState();
 
     this.unsubProvider = this.provider.subscribe((snap) => {
       this.snapshot = snap;
@@ -150,6 +179,15 @@ export class OrbitCommandHud {
       this.fireState = state;
       this.render();
     });
+    this.unsubLogistics = this.logistics.subscribe((state) => {
+      this.logisticsState = state;
+      this.render();
+    });
+    this.render();
+  }
+
+  toggleDrawer(tab: Exclude<ActiveDrawerTab, 'none'>): void {
+    this.activeDrawer = this.activeDrawer === tab ? 'none' : tab;
     this.render();
   }
 
@@ -166,8 +204,12 @@ export class OrbitCommandHud {
     this.unsubProvider();
     this.unsubInteraction();
     this.unsubFireControl();
+    this.unsubLogistics();
     if (this.ownsFireControl) {
       this.fireControl.dispose();
+    }
+    if (this.ownsLogistics) {
+      this.logistics.dispose();
     }
   }
 
@@ -313,6 +355,54 @@ export class OrbitCommandHud {
       case 'fire-intercept-incoming': {
         const shooter = this.interaction.getSelectedUnit();
         void this.fireControl.assignInterceptorsToIncoming(shooter);
+        break;
+      }
+      case 'toggle-drawer': {
+        const tab = actionEl.dataset.tab as Exclude<ActiveDrawerTab, 'none'> | undefined;
+        if (tab) this.toggleDrawer(tab);
+        break;
+      }
+      case 'route-toggle-pause': {
+        const routeId = actionEl.dataset.routeId;
+        if (routeId) void this.logistics.toggleRoutePaused(routeId);
+        break;
+      }
+      case 'route-cycle-batch': {
+        const routeId = actionEl.dataset.routeId;
+        if (routeId) void this.logistics.cycleBatchSize(routeId);
+        break;
+      }
+      case 'route-set-mode': {
+        const routeId = actionEl.dataset.routeId;
+        const mode = actionEl.dataset.mode as TransferMode | undefined;
+        if (routeId && mode) void this.logistics.setTransferMode(routeId, mode);
+        break;
+      }
+      case 'route-set-detour': {
+        const routeId = actionEl.dataset.routeId;
+        if (routeId) this.logistics.beginDetourPlacement(routeId);
+        break;
+      }
+      case 'route-clear-detour': {
+        const routeId = actionEl.dataset.routeId;
+        if (routeId) void this.logistics.clearDetourWaypoint(routeId);
+        break;
+      }
+      case 'route-toggle-escort': {
+        const routeId = actionEl.dataset.routeId;
+        const unitId = actionEl.dataset.unitId;
+        if (routeId && unitId) void this.logistics.toggleEscortBinding(routeId, unitId);
+        break;
+      }
+      case 'build-item': {
+        const kind = actionEl.dataset.kind as BuildQueueKind | undefined;
+        const targetRef = actionEl.dataset.targetRef;
+        if (!kind) break;
+        if (kind === 'relay_depot' && !targetRef) {
+          this.logistics.beginRelayPlacement();
+        } else {
+          void this.logistics.queueBuild(kind, targetRef);
+        }
         break;
       }
     }
@@ -462,27 +552,106 @@ export class OrbitCommandHud {
         </div>`
       : '';
 
+    const completeWonderCount = snapshot.ownWonder.filter((s) => s.status === 'complete').length;
+
     this.root.innerHTML = `
       <div class="cic-topbar">
-        <div class="cic-clock">${escapeHtml(netLabel)} · T+${formatDurationMmSs(snapshot.gameTimeSec)} · ORE ${Math.round(snapshot.resources.ore)} · PROP ${Math.round(snapshot.resources.propellant)}</div>
+        <div class="cic-clock">${escapeHtml(netLabel)} · T+${formatDurationMmSs(snapshot.gameTimeSec)} · ORE ${Math.round(snapshot.resources.ore)} · PROP ${Math.round(snapshot.resources.propellant)} · 运力 ${snapshot.freightersInFlight}/${snapshot.freighterCap} · 奇观 ${completeWonderCount}/${WONDER_CONFIG.slotCount}</div>
         ${netSwitchHtml}
         <div class="cic-modes">
           ${modeBtn('select', '选择', '1')}
           ${modeBtn('orbit_insertion', '进入轨道', '2')}
           ${modeBtn('intercept', '交会拦截', '3')}
           ${modeBtn('fire', '武器火控', '4')}
+          <button class="cic-btn ${this.activeDrawer === 'logistics' ? 'active' : ''}" data-action="toggle-drawer" data-tab="logistics">[5] 物流航线</button>
+          <button class="cic-btn ${this.activeDrawer === 'build' ? 'active' : ''}" data-action="toggle-drawer" data-tab="build">[6] 母港建造</button>
           <button class="cic-btn" data-action="reset-camera">[0] 复位视角</button>
         </div>
         ${modeDetailHtml}
+        ${this.logisticsState.lastMessage ? `<div class="cic-hint">${escapeHtml(this.logisticsState.lastMessage)}</div>` : ''}
         ${this.renderEngagementAdvisories()}
         ${statusLine}
       </div>
       <div class="cic-unit-dock">${unitButtonsHtml}</div>
+      ${this.renderDrawerPanel()}
       ${this.renderUnitControlTerminal()}
       ${this.renderFireControlPanel(selectedUnit)}
       ${cardsHtml}
       ${modalHtml}
     `;
+  }
+
+  private renderDrawerPanel(): string {
+    if (this.activeDrawer === 'logistics') {
+      const escorts = LogisticsBuildController.getEscortCandidates(this.snapshot);
+      const routeCards = this.snapshot.routes
+        .map((r) => {
+          const escortChips = escorts
+            .map((e) => {
+              const bound = r.escortUnitIds.includes(e.id);
+              return `<button class="cic-mini-btn ${bound ? 'active' : ''}" data-action="route-toggle-escort" data-route-id="${escapeHtml(r.id)}" data-unit-id="${escapeHtml(e.id)}">${escapeHtml(e.id)}</button>`;
+            })
+            .join('');
+
+          return `<div class="drawer-card">
+            <div class="card-header">
+              <span>${escapeHtml(r.sourceBodyId.toUpperCase())} → ${escapeHtml(r.targetId)} (${r.resource.toUpperCase()})</span>
+              <span>${r.paused ? 'PAUSED' : 'ACTIVE'}</span>
+            </div>
+            <div class="drawer-actions">
+              <button class="cic-mini-btn ${r.paused ? 'threat' : ''}" data-action="route-toggle-pause" data-route-id="${escapeHtml(r.id)}">${r.paused ? '恢复发车' : '暂停发车'}</button>
+              <button class="cic-mini-btn" data-action="route-cycle-batch" data-route-id="${escapeHtml(r.id)}">${r.batchSize === 1 ? '单船散跑' : `编队 x${r.batchSize}`}</button>
+              <button class="cic-mini-btn ${r.transferMode === 'fuel' ? 'active' : ''}" data-action="route-set-mode" data-route-id="${escapeHtml(r.id)}" data-mode="fuel">节油</button>
+              <button class="cic-mini-btn ${r.transferMode === 'stealth' ? 'active' : ''}" data-action="route-set-mode" data-route-id="${escapeHtml(r.id)}" data-mode="stealth">隐蔽</button>
+              <button class="cic-mini-btn ${this.logisticsState.pendingDetourRouteId === r.id ? 'active' : ''}" data-action="route-set-detour" data-route-id="${escapeHtml(r.id)}">设绕路点</button>
+              ${r.detourWaypoint ? `<button class="cic-mini-btn" data-action="route-clear-detour" data-route-id="${escapeHtml(r.id)}">清绕路</button>` : ''}
+            </div>
+            <div class="drawer-escorts">护航绑定: ${escortChips || '<span class="chip-meta">无护航舰</span>'}</div>
+          </div>`;
+        })
+        .join('');
+
+      return `<aside class="cic-panel cic-drawer">
+        <div class="panel-title">
+          <span>物流航线调度 (${this.snapshot.freightersInFlight}/${this.snapshot.freighterCap} 运力)</span>
+          <button class="cic-mini-btn" data-action="toggle-drawer" data-tab="logistics">收起</button>
+        </div>
+        <div class="drawer-list">${routeCards}</div>
+      </aside>`;
+    }
+
+    if (this.activeDrawer === 'build') {
+      const wonderName = WONDER_CONFIG.namesByFaction[this.snapshot.faction];
+      const wonderGrid = this.snapshot.ownWonder
+        .map(
+          (slot) =>
+            `<span class="wonder-cell wonder-${slot.status}" title="Slot ${slot.index + 1}: ${slot.status}">${slot.index + 1}</span>`,
+        )
+        .join('');
+
+      const catalogHtml = getBuildCatalog()
+        .map((item) => {
+          const isOutpost = item.kind === 'outpost';
+          const targetAttr = isOutpost ? 'data-target-ref="eros"' : '';
+          const label = isOutpost ? `${item.label} (Eros)` : item.label;
+          return `<button class="cic-mini-btn build-item-btn" data-action="build-item" data-kind="${escapeHtml(item.kind)}" ${targetAttr}>
+            ${escapeHtml(label)} · ${item.costOre}O${item.costPropellant > 0 ? `/${item.costPropellant}P` : ''}
+          </button>`;
+        })
+        .join('');
+
+      return `<aside class="cic-panel cic-drawer">
+        <div class="panel-title">
+          <span>母港建造与共轨奇观 · ${escapeHtml(wonderName)}</span>
+          <button class="cic-mini-btn" data-action="toggle-drawer" data-tab="build">收起</button>
+        </div>
+        <div class="wonder-grid">${wonderGrid}</div>
+        <div class="chip-meta">运力扩容: ${LOGISTICS_CONFIG.freighterCapCostOre} Ore · 奇观槽位: ${WONDER_CONFIG.orePerSlot} Ore</div>
+        <div class="build-list">${catalogHtml}</div>
+      </aside>`;
+    }
+
+    return '';
   }
 
   private renderEngagementAdvisories(): string {

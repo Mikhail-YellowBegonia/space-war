@@ -129,9 +129,13 @@ export class MockWorldProvider implements IWorldProvider {
   private readonly interceptedTrackIds = new Set<string>();
   private readonly routes: LogisticsRoute[] = [];
   private readonly ownWonder: WonderSlot[] = createInitialWonderSlots();
+  private resources = { ore: 1200, propellant: 500 };
+  private freighterCap: number = LOGISTICS_CONFIG.initialFreighterCap;
+  private freightersInFlight = 1;
   private readonly launchedDronesByCarrier = new Map<string, number>();
   private nextDroneSeq = 1;
   private nextMunitionSeq = 1;
+  private nextBuildSeq = 1;
   private vfxEvents: VfxEvent[] = [];
   private timerId: ReturnType<typeof setInterval> | null = null;
   private scriptedRaiderOrbit: KeplerOrbit = {
@@ -209,17 +213,45 @@ export class MockWorldProvider implements IWorldProvider {
       this.units.set(unit.id, unit);
     }
 
-    this.routes.push({
-      id: `${this.faction}-route-1`,
-      faction: this.faction,
-      sourceBodyId: isEarth ? 'venus' : 'ceres',
-      targetId: isEarth ? 'E-HOME' : 'M-HOME',
-      resource: isEarth ? 'ore' : 'propellant',
-      paused: false,
-      batchSize: 1,
-      transferMode: 'fuel',
-      escortUnitIds: [],
-    });
+    this.routes.push(
+      {
+        id: `${this.faction}-route-1`,
+        faction: this.faction,
+        sourceBodyId: isEarth ? 'venus' : 'ceres',
+        targetId: isEarth ? 'E-HOME' : 'M-HOME',
+        resource: isEarth ? 'ore' : 'propellant',
+        paused: false,
+        batchSize: 1,
+        transferMode: 'fuel',
+        escortUnitIds: [],
+      },
+      {
+        id: `${this.faction}-route-2`,
+        faction: this.faction,
+        sourceBodyId: 'eros',
+        targetId: isEarth ? 'E-HOME' : 'M-HOME',
+        resource: isEarth ? 'propellant' : 'ore',
+        paused: false,
+        batchSize: 2,
+        transferMode: 'stealth',
+        escortUnitIds: [],
+      },
+    );
+
+    if (this.ownWonder[0]) {
+      this.ownWonder[0] = {
+        ...this.ownWonder[0],
+        status: 'complete',
+        progressOre: this.ownWonder[0].requiredOre,
+      };
+    }
+    if (this.ownWonder[1]) {
+      this.ownWonder[1] = {
+        ...this.ownWonder[1],
+        status: 'building',
+        progressOre: 220,
+      };
+    }
   }
 
   start(): void {
@@ -535,9 +567,9 @@ export class MockWorldProvider implements IWorldProvider {
       tick: this.tick,
       gameTimeSec: this.gameTimeSec,
       faction: this.faction,
-      resources: { ore: 420, propellant: 260 },
-      freighterCap: LOGISTICS_CONFIG.initialFreighterCap,
-      freightersInFlight: 1,
+      resources: { ...this.resources },
+      freighterCap: this.freighterCap,
+      freightersInFlight: this.freightersInFlight,
       celestials,
       ownUnits,
       ownMunitions: Array.from(this.munitions.values())
@@ -786,8 +818,130 @@ export class MockWorldProvider implements IWorldProvider {
         return { accepted: true };
       }
 
-      default:
-        return { accepted: false, reason: `Command ${command.type} not implemented in M1 mock` };
+      case 'update_route': {
+        const idx = this.routes.findIndex((r) => r.id === command.routeId);
+        if (idx === -1) {
+          return { accepted: false, reason: `Unknown route: ${command.routeId}` };
+        }
+        this.routes[idx] = {
+          ...this.routes[idx]!,
+          ...command.patch,
+        };
+        this.emitSnapshot();
+        return { accepted: true };
+      }
+
+      case 'queue_build': {
+        if (command.kind === 'freighter_cap') {
+          if (this.resources.ore < LOGISTICS_CONFIG.freighterCapCostOre) {
+            return { accepted: false, reason: 'Insufficient Ore' };
+          }
+          this.resources.ore -= LOGISTICS_CONFIG.freighterCapCostOre;
+          this.freighterCap += 1;
+          this.emitSnapshot();
+          return { accepted: true };
+        }
+
+        if (command.kind === 'wonder_slot') {
+          if (this.resources.ore < WONDER_CONFIG.orePerSlot) {
+            return { accepted: false, reason: 'Insufficient Ore for wonder slot' };
+          }
+          const emptySlot = this.ownWonder.find((s) => s.status === 'empty');
+          if (!emptySlot) {
+            return { accepted: false, reason: 'No empty wonder slots remaining' };
+          }
+          this.resources.ore -= WONDER_CONFIG.orePerSlot;
+          emptySlot.status = 'building';
+          emptySlot.progressOre = emptySlot.requiredOre * 0.25;
+          this.emitSnapshot();
+          return { accepted: true };
+        }
+
+        if (command.kind === 'relay_depot') {
+          const cfg = UNIT_CONFIGS.relay_depot;
+          if (this.resources.ore < cfg.costOre || this.resources.propellant < cfg.costPropellant) {
+            return { accepted: false, reason: 'Insufficient resources for relay depot' };
+          }
+          const pos =
+            typeof command.targetRef === 'object' && command.targetRef !== null
+              ? command.targetRef
+              : { x: 1.25, y: 0.25 };
+          this.resources.ore -= cfg.costOre;
+          this.resources.propellant -= cfg.costPropellant;
+          const r = Math.max(0.3, Math.hypot(pos.x, pos.y));
+          const angle = Math.atan2(pos.y, pos.x);
+          const id = `${this.faction === 'earth' ? 'E' : 'M'}-RLY-${this.nextBuildSeq++}`;
+          this.units.set(
+            id,
+            createMockUnit({
+              id,
+              faction: this.faction,
+              kind: 'relay_depot',
+              orbit: { a: r, e: 0.02, omega: angle, meanAnomaly0: 0, epochSec: this.gameTimeSec },
+              gameTimeSec: this.gameTimeSec,
+            }),
+          );
+          this.emitSnapshot();
+          return { accepted: true };
+        }
+
+        if (command.kind === 'outpost') {
+          const cfg = UNIT_CONFIGS.mining_outpost;
+          if (this.resources.ore < cfg.costOre || this.resources.propellant < cfg.costPropellant) {
+            return { accepted: false, reason: 'Insufficient resources for mining outpost' };
+          }
+          const bodyId = typeof command.targetRef === 'string' ? command.targetRef : 'eros';
+          const body = CELESTIAL_BODIES_BY_ID[bodyId];
+          if (!body?.orbit) {
+            return { accepted: false, reason: `Invalid outpost body: ${bodyId}` };
+          }
+          this.resources.ore -= cfg.costOre;
+          this.resources.propellant -= cfg.costPropellant;
+          const id = `${this.faction === 'earth' ? 'E' : 'M'}-OUT-${this.nextBuildSeq++}`;
+          this.units.set(
+            id,
+            createMockUnit({
+              id,
+              faction: this.faction,
+              kind: 'mining_outpost',
+              orbit: { ...body.orbit },
+              gameTimeSec: this.gameTimeSec,
+            }),
+          );
+          this.emitSnapshot();
+          return { accepted: true };
+        }
+
+        const unitKind = command.kind as UnitKind;
+        const cfg = UNIT_CONFIGS[unitKind];
+        if (!cfg || cfg.buildLocation !== 'home_base_only') {
+          return { accepted: false, reason: `Cannot build ${command.kind} at home base` };
+        }
+        if (this.resources.ore < cfg.costOre || this.resources.propellant < cfg.costPropellant) {
+          return { accepted: false, reason: 'Insufficient resources' };
+        }
+        this.resources.ore -= cfg.costOre;
+        this.resources.propellant -= cfg.costPropellant;
+        const homeOrbit = CELESTIAL_BODIES_BY_ID[this.faction]!.orbit!;
+        const seq = this.nextBuildSeq++;
+        const id = `${this.faction === 'earth' ? 'E' : 'M'}-${unitKind.slice(0, 3).toUpperCase()}-${seq}`;
+        this.units.set(
+          id,
+          createMockUnit({
+            id,
+            faction: this.faction,
+            kind: unitKind,
+            orbit: {
+              ...homeOrbit,
+              a: homeOrbit.a + 0.045,
+              meanAnomaly0: homeOrbit.meanAnomaly0 + 0.03 * seq,
+            },
+            gameTimeSec: this.gameTimeSec,
+          }),
+        );
+        this.emitSnapshot();
+        return { accepted: true };
+      }
     }
   }
 
