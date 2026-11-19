@@ -1,0 +1,29 @@
+{
+  "name": "space-war",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.22.0",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "build": "pnpm -r build",
+    "typecheck": "pnpm -r typecheck",
+    "test": "pnpm -r test",
+    "lint": "eslint .",
+    "dev": "concurrently -k -n server,client -c green,cyan \"pnpm --filter @space-war/server dev\" \"pnpm --filter @space-war/client dev\"",
+    "dev:server": "pnpm --filter @space-war/server dev",
+    "dev:client": "pnpm --filter @space-war/client dev"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.25.0",
+    "@types/node": "^22.15.0",
+    "concurrently": "^9.1.2",
+    "eslint": "^9.25.0",
+    "globals": "^16.0.0",
+    "typescript": "^5.8.3",
+    "typescript-eslint": "^8.30.0",
+    "vitest": "^3.1.0"
+  }
+}

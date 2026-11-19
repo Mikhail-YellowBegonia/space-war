@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Space War — Inner Solar System CIC</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background-color: #050a0e;
+        color: #7df9ff;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      }
+
+      #viewport {
+        display: block;
+        width: 100%;
+        height: 100%;
+      }
+
+      #hud-boot {
+        position: fixed;
+        top: 12px;
+        left: 16px;
+        padding: 6px 10px;
+        border: 1px solid rgba(125, 249, 255, 0.35);
+        background: rgba(5, 10, 14, 0.85);
+        font-size: 12px;
+        letter-spacing: 0.04em;
+        pointer-events: none;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="viewport"></canvas>
+    <div id="hud-boot">INITIALIZING CIC...</div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
