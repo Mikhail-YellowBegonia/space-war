@@ -9,6 +9,7 @@ import {
   type UnitEntity,
 } from '@space-war/shared';
 import { launchCarrierDrone } from '../systems/ew.js';
+import { fireMunitionSalvo } from '../systems/munitions.js';
 import type { WorldState } from './worldState.js';
 
 export interface CommandValidationResult {
@@ -217,11 +218,13 @@ export function applyPlayerCommand(
     }
 
     case 'fire_munition': {
-      const { unit, error } = getOwnedUnit(world, faction, command.unitId);
-      if (!unit) {
-        return { accepted: false, reason: error };
-      }
-      return { accepted: false, reason: `${command.type} system pending M3 integration` };
+      return fireMunitionSalvo(world, faction, {
+        unitId: command.unitId,
+        targetTrackId: command.targetTrackId,
+        profileId: command.profileId,
+        count: command.count,
+        coldCoast: command.coldCoast,
+      });
     }
 
     case 'queue_build': {

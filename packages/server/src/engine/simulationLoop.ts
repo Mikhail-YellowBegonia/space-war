@@ -10,6 +10,7 @@ import { applyPlayerCommand, type CommandValidationResult } from './commandPipel
 import { buildFactionSnapshot, createInitialWorldState, type WorldState } from './worldState.js';
 import { createThermalTickSystem } from '../systems/thermal.js';
 import { createEwTickSystem } from '../systems/ew.js';
+import { createMunitionTickSystem } from '../systems/munitions.js';
 import { createSensorTickSystem } from '../systems/sensors.js';
 
 export interface TickSystemContext {
@@ -49,6 +50,7 @@ export class SimulationLoop {
     this.dtSec = 1 / this.tickRateHz;
     this.systems = [
       createEwTickSystem(),
+      createMunitionTickSystem(),
       ...(options.systems ?? []),
       createThermalTickSystem(this.irByUnit),
       createSensorTickSystem(this.irByUnit),
