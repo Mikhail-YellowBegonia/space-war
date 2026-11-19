@@ -1,7 +1,11 @@
 import { SOLAR_SYSTEM_BODIES, type FactionId } from '@space-war/shared';
 import { getClientBootBanner } from './app.js';
 import { Camera2D, CameraController } from './camera/index.js';
-import { FireControlManager, OrbitInteractionManager } from './interaction/index.js';
+import {
+  FireControlManager,
+  LogisticsBuildController,
+  OrbitInteractionManager,
+} from './interaction/index.js';
 import {
   MockWorldProvider,
   WsWorldProvider,
@@ -52,6 +56,7 @@ function bootstrapClient(): void {
   let provider: IWorldProvider;
   let interaction: OrbitInteractionManager;
   let fireControl: FireControlManager;
+  let logistics: LogisticsBuildController;
   let unsubWsStatus: (() => void) | null = null;
   let hud: OrbitCommandHud | null = null;
 
@@ -59,7 +64,12 @@ function bootstrapClient(): void {
     mode: 'mock' | 'ws',
     roomId: string,
     faction: FactionId,
-  ): { provider: IWorldProvider; interaction: OrbitInteractionManager; fireControl: FireControlManager } => {
+  ): {
+    provider: IWorldProvider;
+    interaction: OrbitInteractionManager;
+    fireControl: FireControlManager;
+    logistics: LogisticsBuildController;
+  } => {
     currentMode = mode;
     currentRoomId = roomId;
     currentFaction = faction;
@@ -77,6 +87,7 @@ function bootstrapClient(): void {
         provider: wsProvider,
         interaction: new OrbitInteractionManager(wsProvider, SOLAR_SYSTEM_BODIES),
         fireControl: new FireControlManager(wsProvider),
+        logistics: new LogisticsBuildController(wsProvider),
       };
     }
 
@@ -85,6 +96,7 @@ function bootstrapClient(): void {
       provider: mockProvider,
       interaction: new OrbitInteractionManager(mockProvider, SOLAR_SYSTEM_BODIES),
       fireControl: new FireControlManager(mockProvider),
+      logistics: new LogisticsBuildController(mockProvider),
     };
   };
 
@@ -103,6 +115,7 @@ function bootstrapClient(): void {
   ): void => {
     unsubWsStatus?.();
     unsubWsStatus = null;
+    logistics.dispose();
     fireControl.dispose();
     interaction.dispose();
     provider.dispose();
@@ -111,13 +124,15 @@ function bootstrapClient(): void {
     provider = next.provider;
     interaction = next.interaction;
     fireControl = next.fireControl;
-    hud?.rebind(provider, interaction, buildConnectionConfig(), fireControl);
+    logistics = next.logistics;
+    hud?.rebind(provider, interaction, buildConnectionConfig(), fireControl, logistics);
   };
 
   const initialSession = createSession(currentMode, currentRoomId, currentFaction);
   provider = initialSession.provider;
   interaction = initialSession.interaction;
   fireControl = initialSession.fireControl;
+  logistics = initialSession.logistics;
 
   const camera = new Camera2D({
     center: { x: 0, y: 0 },
@@ -153,6 +168,7 @@ function bootstrapClient(): void {
         provider,
         interaction,
         fireControl,
+        logistics,
         onResetCamera: () => camera.resetOverview(),
         connection: buildConnectionConfig(),
       })
@@ -174,6 +190,15 @@ function bootstrapClient(): void {
       return;
     }
     const local = getLocalPoint(event);
+    const logState = logistics.getState();
+    if (logState.pendingDetourRouteId) {
+      void logistics.setDetourWaypoint(logState.pendingDetourRouteId, camera.screenToWorld(local));
+      return;
+    }
+    if (logState.pendingRelayPlacement) {
+      void logistics.placeRelayDepotAt(camera.screenToWorld(local));
+      return;
+    }
     if (interaction.getState().mode === 'fire' || event.shiftKey) {
       boxSelecting = true;
       fireControl.beginTargetBoxOrPick(local);
@@ -225,6 +250,10 @@ function bootstrapClient(): void {
       interaction.setMode('intercept');
     } else if (event.key === '4') {
       interaction.setMode('fire');
+    } else if (event.key === '5') {
+      hud?.toggleDrawer('logistics');
+    } else if (event.key === '6') {
+      hud?.toggleDrawer('build');
     } else if (event.key === 'f' || event.key === 'F') {
       void fireControl.fireAtSelectedTargets(interaction.getSelectedUnit());
     } else if (event.key === 'Enter') {
@@ -248,6 +277,7 @@ function bootstrapClient(): void {
     unsubWsStatus?.();
     cameraController.dispose();
     hud?.dispose();
+    logistics.dispose();
     fireControl.dispose();
     interaction.dispose();
     provider.dispose();
@@ -283,6 +313,9 @@ function bootstrapClient(): void {
       boxSelectRect: fireState.boxSelectRect,
       engagementAdvisories: fireState.advisories,
       vfxEvents: snap.vfxEvents,
+      faction: snap.faction,
+      ownWonder: snap.ownWonder,
+      routes: snap.routes,
       previewTransfer: chosenOption
         ? {
             option: chosenOption,
