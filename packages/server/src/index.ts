@@ -2,6 +2,7 @@ import { createSpaceWarServer, DEFAULT_PORT } from './server.js';
 
 export * from './engine/index.js';
 export * from './net/index.js';
+export * from './systems/index.js';
 export { createSpaceWarServer, DEFAULT_PORT, getHealthPayload } from './server.js';
 export type { HealthPayload, SpaceWarServer, SpaceWarServerOptions } from './server.js';
 
