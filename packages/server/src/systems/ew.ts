@@ -169,7 +169,7 @@ export function launchCarrierDrone(
 /**
  * Advances active EW blinding-laser illumination and expires elapsed sensor-blindness timers.
  */
-export function stepEwSystem(world: WorldState, dtSec: number): void {
+export function stepEwSystem(world: WorldState, _dtSec = 0.1): void {
   for (const [unitId, untilSec] of world.sensorBlindUntilSec.entries()) {
     if (untilSec <= world.gameTimeSec) {
       world.sensorBlindUntilSec.delete(unitId);
@@ -215,11 +215,7 @@ export function stepEwSystem(world: WorldState, dtSec: number): void {
     }
 
     if (firedDazzle) {
-      const updatedHeat = Math.min(
-        attacker.maxHeat,
-        attacker.heat + attackerCfg.weapons.laserHeatPerSec * dtSec,
-      );
-      world.units.set(attacker.id, { ...attacker, heat: updatedHeat });
+      world.laserActiveUnitIds.add(attacker.id);
     }
   }
 }

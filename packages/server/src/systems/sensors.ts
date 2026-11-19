@@ -416,7 +416,10 @@ function triangulatePassiveBearings(
     maxParallaxRad: bestAngle,
     errorMajorAu: major,
     errorMinorAu: minor,
-    errorAngleRad: 0.5 * (obsA.channels.bearingRad + obsB.channels.bearingRad),
+    errorAngleRad: wrapSignedAngle(
+      obsA.channels.bearingRad +
+        0.5 * wrapSignedAngle(obsB.channels.bearingRad - obsA.channels.bearingRad),
+    ),
   };
 }
 
@@ -649,9 +652,50 @@ export function updateFactionSensors(
     memory.set(target.id, record);
   }
 
+  // Emit LADAR sweep alerts for any friendly unit illuminated by an otherwise-undetected enemy LADAR
+  for (const unit of world.units.values()) {
+    if (unit.faction === observerFaction || unit.hp <= 0 || unit.ladarTargetAngle === undefined) {
+      continue;
+    }
+    if (unit.emconSilent || unit.subsystems.sensors === 'offline') {
+      continue;
+    }
+    const alertId = `ladar-warn-${unit.id}`;
+    if (activeTargetIds.has(unit.id)) {
+      memory.delete(alertId);
+      continue;
+    }
+    for (const friendly of observers) {
+      const ch = evaluateSensorChannels(unit, friendly, world, irByUnit);
+      if (!ch.occluded && ch.ladarHit) {
+        const existingAlert = memory.get(alertId);
+        const trackId = existingAlert?.trackId ?? allocateTrackId(world, observerFaction);
+        const bearingToSource = Math.atan2(unit.pos.y - friendly.pos.y, unit.pos.x - friendly.pos.x);
+        const alertRecord: InternalTrackRecord = {
+          trackId,
+          targetId: unit.id,
+          confidence: 'bearing',
+          suspectedKind: 'ship',
+          bearingRad: bearingToSource,
+          originPos: { ...friendly.pos },
+          lastObservedSec: world.gameTimeSec,
+          isJammed: false,
+        };
+        memory.set(alertId, alertRecord);
+        activeTargetIds.add(alertId);
+        break;
+      }
+    }
+  }
+
   // Persist / decay lost tracks -> ghost or expire
   const output: SensorTrack[] = [];
   for (const [targetId, record] of memory.entries()) {
+    if (targetId.startsWith('ladar-warn-') && activeTargetIds.has(record.targetId)) {
+      memory.delete(targetId);
+      continue;
+    }
+
     if (activeTargetIds.has(targetId)) {
       output.push(sanitizeTrack(record));
       continue;
@@ -679,42 +723,47 @@ export function updateFactionSensors(
     }
   }
 
-  // Also emit LADAR sweep alerts for any friendly unit currently illuminated by an enemy LADAR
-  for (const unit of world.units.values()) {
-    if (unit.faction === observerFaction || unit.hp <= 0 || unit.ladarTargetAngle === undefined) {
-      continue;
-    }
-    if (unit.emconSilent || unit.subsystems.sensors === 'offline') {
-      continue;
-    }
-    for (const friendly of observers) {
-      const ch = evaluateSensorChannels(unit, friendly, world, irByUnit);
-      if (!ch.occluded && ch.ladarHit) {
-        const alertId = `ladar-warn-${unit.id}`;
-        const existingAlert = memory.get(alertId);
-        const trackId = existingAlert?.trackId ?? allocateTrackId(world, observerFaction);
-        const bearingToSource = Math.atan2(unit.pos.y - friendly.pos.y, unit.pos.x - friendly.pos.x);
-        const alertRecord: InternalTrackRecord = {
-          trackId,
-          targetId: alertId,
-          confidence: 'bearing',
-          suspectedKind: 'ship',
-          bearingRad: bearingToSource,
-          originPos: { ...friendly.pos },
-          lastObservedSec: world.gameTimeSec,
-          isJammed: false,
-        };
-        memory.set(alertId, alertRecord);
-        if (!activeTargetIds.has(unit.id)) {
-          output.push(sanitizeTrack(alertRecord));
-        }
-        break;
-      }
-    }
-  }
-
   world.tracksByFaction[observerFaction] = output;
   return output;
+}
+
+export interface ResolvedFiringTrack {
+  record: InternalTrackRecord;
+  entity?: UnitEntity | MunitionEntity;
+  aimPos: Vec2;
+  aimVel: Vec2;
+}
+
+/**
+ * Resolves a faction-local `trackId` for weapon firing (SW-15 / SW-16).
+ * Rejects unknown tracks and bearing-only contacts (which lack range/position solutions).
+ */
+export function resolveTrackTargetForFiring(
+  world: WorldState,
+  faction: FactionId,
+  trackId: string,
+): { target?: ResolvedFiringTrack; error?: string } {
+  const memory = world.trackMemoryByFaction[faction];
+  for (const [key, record] of memory.entries()) {
+    if (record.trackId !== trackId) {
+      continue;
+    }
+    if (key.startsWith('ladar-warn-') || record.confidence === 'bearing' || !record.pos) {
+      return {
+        error: `Track ${trackId} is bearing-only and lacks a range solution for weapon lock`,
+      };
+    }
+    const entity = world.units.get(record.targetId) ?? world.munitions.get(record.targetId);
+    return {
+      target: {
+        record,
+        entity,
+        aimPos: { ...record.pos },
+        aimVel: record.vel ? { ...record.vel } : { x: 0, y: 0 },
+      },
+    };
+  }
+  return { error: `Unknown or expired sensor track: ${trackId}` };
 }
 
 /**

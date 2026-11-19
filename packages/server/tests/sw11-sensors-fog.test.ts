@@ -280,4 +280,101 @@ describe('SW-11 multi-channel sensors and authoritative fog-of-war engine', () =
     );
     expect(separation).toBeGreaterThan(0.005);
   });
+
+  it('does not emit duplicate transient ladar-warn bearing tracks once enemy source is already detected', () => {
+    const world = createEmptyTestWorld();
+    const earthFrigate = createUnitEntity({
+      id: 'e-frigate',
+      faction: 'earth',
+      kind: 'escort_frigate',
+      orbit: { a: 1.0, e: 0, omega: 0, meanAnomaly0: Math.PI / 2, epochSec: 0 },
+      emconSilent: false,
+    });
+    const marsRaider = createUnitEntity({
+      id: 'm-raider',
+      faction: 'mars',
+      kind: 'raider',
+      orbit: { a: 1.03, e: 0, omega: 0, meanAnomaly0: Math.PI / 2, epochSec: 0 },
+      emconSilent: true,
+    });
+    earthFrigate.ladarTargetAngle = Math.atan2(
+      marsRaider.pos.y - earthFrigate.pos.y,
+      marsRaider.pos.x - earthFrigate.pos.x,
+    );
+
+    // Initially Mars raider is blinded/damaged so it only receives a ladar-warn bearing
+    marsRaider.subsystems.sensors = 'damaged';
+    world.sensorBlindUntilSec.set(marsRaider.id, 0.05);
+    world.units.set(earthFrigate.id, earthFrigate);
+    world.units.set(marsRaider.id, marsRaider);
+
+    stepSensorsAndFog(world);
+    const snap1 = buildFactionSnapshot(world, 'mars');
+    expect(snap1.tracks).toHaveLength(1);
+    expect(snap1.tracks[0]!.confidence).toBe('bearing');
+
+    // Now Mars raider activates radar and recovers sensors -> directly detects frigate
+    world.gameTimeSec = 0.1;
+    world.tick = 1;
+    world.sensorBlindUntilSec.delete(marsRaider.id);
+    marsRaider.subsystems.sensors = 'normal';
+    marsRaider.emconSilent = false;
+    marsRaider.radarActive = true;
+
+    stepSensorsAndFog(world);
+    const snap2 = buildFactionSnapshot(world, 'mars');
+    expect(snap2.tracks).toHaveLength(1);
+    expect(snap2.tracks[0]!.confidence).toBe('confirmed');
+
+    // Subsequent tick must still have exactly 1 track (no leaked 4s transient ladar-warn)
+    world.gameTimeSec = 0.2;
+    world.tick = 2;
+    stepSensorsAndFog(world);
+    const snap3 = buildFactionSnapshot(world, 'mars');
+    expect(snap3.tracks).toHaveLength(1);
+    expect(snap3.tracks[0]!.confidence).toBe('confirmed');
+  });
+
+  it('wraps triangulated errorAngleRad cleanly across the +/-pi boundary', () => {
+    const world = createEmptyTestWorld();
+    const irByUnit = new Map<string, number>();
+
+    const obsA = createUnitEntity({
+      id: 'e-obs-a',
+      faction: 'earth',
+      kind: 'recon_corvette',
+      orbit: { a: 1.0, e: 0, omega: 0, meanAnomaly0: Math.PI / 2, epochSec: 0 },
+      emconSilent: true,
+    });
+    const obsB = createUnitEntity({
+      id: 'e-obs-b',
+      faction: 'earth',
+      kind: 'recon_corvette',
+      orbit: { a: 1.0, e: 0, omega: 0, meanAnomaly0: Math.PI / 2, epochSec: 0 },
+      emconSilent: true,
+    });
+    const target = createUnitEntity({
+      id: 'm-target',
+      faction: 'mars',
+      kind: 'cruiser',
+      orbit: { a: 1.5, e: 0, omega: 0, meanAnomaly0: Math.PI * 0.75, epochSec: 0 },
+      emconSilent: false,
+    });
+
+    // Place observers symmetrically in Y looking due West (~ +/-178 deg, ~4.1 deg parallax -> uncertain)
+    obsA.pos = { x: 0, y: 1.036 };
+    obsB.pos = { x: 0, y: 0.964 };
+    target.pos = { x: -1.0, y: 1.0 };
+    irByUnit.set(target.id, 250);
+
+    world.units.set(obsA.id, obsA);
+    world.units.set(obsB.id, obsB);
+    world.units.set(target.id, target);
+    stepSensorsAndFog(world, irByUnit);
+
+    const tracks = buildFactionSnapshot(world, 'earth').tracks;
+    expect(tracks).toHaveLength(1);
+    expect(tracks[0]!.confidence).toBe('uncertain');
+    expect(Math.abs(tracks[0]!.errorAngleRad!)).toBeGreaterThan(3.0);
+  });
 });

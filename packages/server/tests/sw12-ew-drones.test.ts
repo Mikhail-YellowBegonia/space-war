@@ -7,6 +7,7 @@ import {
   buildFactionSnapshot,
   createUnitEntity,
   evaluateSensorChannels,
+  resolveTrackTargetForFiring,
   stepEwSystem,
   stepSensorsAndFog,
   type WorldState,
@@ -21,6 +22,7 @@ function createEmptyTestWorld(): WorldState {
   base.trackMemoryByFaction.earth.clear();
   base.trackMemoryByFaction.mars.clear();
   base.sensorBlindUntilSec.clear();
+  base.laserActiveUnitIds.clear();
   base.launchedDronesByCarrier.clear();
   return base;
 }
@@ -258,5 +260,114 @@ describe('SW-12 electronic warfare jamming, dazzling laser, and drones', () => {
     expect(marsSnapAfterJam.tracks.some((t) => t.isJammed && t.confidence === 'uncertain')).toBe(
       true,
     );
+  });
+
+  it('accounts for EW blinding laser heat and same-tick IR spike in SimulationLoop ordering', () => {
+    const setupRunner = (withTargetInLaserCone: boolean) => {
+      const runner = new HeadlessMatchRunner();
+      const world = runner.getWorldState();
+      world.units.clear();
+      world.tracksByFaction.earth = [];
+      world.tracksByFaction.mars = [];
+      world.trackMemoryByFaction.earth.clear();
+      world.trackMemoryByFaction.mars.clear();
+      world.sensorBlindUntilSec.clear();
+      world.laserActiveUnitIds.clear();
+
+      const frigate = createUnitEntity({
+        id: 'e-frigate',
+        faction: 'earth',
+        kind: 'escort_frigate',
+        orbit: { a: 1.0, e: 0, omega: 0, meanAnomaly0: Math.PI / 2, epochSec: 0 },
+        emconSilent: false,
+      });
+      const marsRaider = createUnitEntity({
+        id: 'm-raider',
+        faction: 'mars',
+        kind: 'raider',
+        orbit: {
+          a: withTargetInLaserCone ? 1.018 : 1.35,
+          e: 0,
+          omega: 0,
+          meanAnomaly0: Math.PI / 2,
+          epochSec: 0,
+        },
+        emconSilent: false,
+      });
+      frigate.ladarTargetAngle = Math.atan2(
+        marsRaider.pos.y - frigate.pos.y,
+        marsRaider.pos.x - frigate.pos.x,
+      );
+      world.units.set(frigate.id, frigate);
+      world.units.set(marsRaider.id, marsRaider);
+      return runner;
+    };
+
+    const firingRunner = setupRunner(true);
+    const idleRunner = setupRunner(false);
+
+    firingRunner.stepTick();
+    idleRunner.stepTick();
+
+    expect(firingRunner.getWorldState().laserActiveUnitIds.has('e-frigate')).toBe(true);
+    expect(idleRunner.getWorldState().laserActiveUnitIds.has('e-frigate')).toBe(false);
+
+    const firingFrigate = firingRunner.getWorldState().units.get('e-frigate')!;
+    const idleFrigate = idleRunner.getWorldState().units.get('e-frigate')!;
+    expect(firingFrigate.heat).toBeGreaterThan(idleFrigate.heat);
+    expect(firingRunner.loop.getUnitIrSignature('e-frigate')).toBeGreaterThan(
+      idleRunner.loop.getUnitIrSignature('e-frigate') +
+        UNIT_CONFIGS.escort_frigate.weapons.laserHeatPerSec * 2,
+    );
+  });
+
+  it('resolveTrackTargetForFiring rejects bearing-only contacts and resolves uncertain/confirmed tracks', () => {
+    const world = createEmptyTestWorld();
+    const earthScout = createUnitEntity({
+      id: 'e-scout',
+      faction: 'earth',
+      kind: 'recon_corvette',
+      orbit: { a: 1.0, e: 0, omega: 0, meanAnomaly0: Math.PI / 2, epochSec: 0 },
+      emconSilent: true,
+    });
+    const marsCruiser = createUnitEntity({
+      id: 'm-cruiser',
+      faction: 'mars',
+      kind: 'cruiser',
+      orbit: { a: 1.9, e: 0, omega: 0, meanAnomaly0: Math.PI / 2, epochSec: 0 },
+      radarActive: true,
+    });
+    world.units.set(earthScout.id, earthScout);
+    world.units.set(marsCruiser.id, marsCruiser);
+
+    // Far ESM contact -> bearing-only -> must be rejected by firing resolver
+    stepSensorsAndFog(world);
+    const bearingTrack = buildFactionSnapshot(world, 'earth').tracks[0]!;
+    expect(bearingTrack.confidence).toBe('bearing');
+    const rejected = resolveTrackTargetForFiring(world, 'earth', bearingTrack.trackId);
+    expect(rejected.target).toBeUndefined();
+    expect(rejected.error).toBeDefined();
+
+    // Activate radar close enough (> 0.25 AU so passive IR/Opt doesn't confirm) + jammer -> uncertain
+    earthScout.emconSilent = false;
+    earthScout.radarActive = true;
+    marsCruiser.jammerActive = true;
+    marsCruiser.pos = { x: 0, y: 1.27 };
+    stepSensorsAndFog(world);
+
+    const uncertainTrack = buildFactionSnapshot(world, 'earth').tracks[0]!;
+    expect(uncertainTrack.confidence).toBe('uncertain');
+    const resolvedUncertain = resolveTrackTargetForFiring(world, 'earth', uncertainTrack.trackId);
+    expect(resolvedUncertain.target).toBeDefined();
+    expect(resolvedUncertain.target!.entity?.id).toBe('m-cruiser');
+
+    // Disable jammer -> confirmed -> accepted by firing resolver
+    marsCruiser.jammerActive = false;
+    stepSensorsAndFog(world);
+    const confirmedTrack = buildFactionSnapshot(world, 'earth').tracks[0]!;
+    expect(confirmedTrack.confidence).toBe('confirmed');
+    const resolvedConfirmed = resolveTrackTargetForFiring(world, 'earth', confirmedTrack.trackId);
+    expect(resolvedConfirmed.target).toBeDefined();
+    expect(resolvedConfirmed.target!.aimPos.y).toBeCloseTo(1.27, 6);
   });
 });

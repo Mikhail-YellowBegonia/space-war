@@ -58,6 +58,7 @@ export interface WorldState {
   trackMemoryByFaction: Record<FactionId, Map<string, InternalTrackRecord>>;
   nextTrackSeqByFaction: Record<FactionId, number>;
   sensorBlindUntilSec: Map<string, number>;
+  laserActiveUnitIds: Set<string>;
   launchedDronesByCarrier: Map<string, number>;
   routesByFaction: Record<FactionId, LogisticsRoute[]>;
   factions: Record<FactionId, FactionRuntimeState>;
@@ -89,6 +90,7 @@ export function createUnitEntity(params: {
   propulsion?: PropulsionType;
   emconSilent?: boolean;
   radarActive?: boolean;
+  jammerActive?: boolean;
 }): UnitEntity {
   const cfg = UNIT_CONFIGS[params.kind];
   const tSec = params.gameTimeSec ?? 0;
@@ -118,7 +120,7 @@ export function createUnitEntity(params: {
     radiatorsOpen: !emconSilent,
     emconSilent,
     radarActive: emconSilent ? false : (params.radarActive ?? false),
-    jammerActive: false,
+    jammerActive: emconSilent ? false : (params.jammerActive ?? false),
     ammoStock: cfg.weapons.ammoCapacity,
     plannedBurns: [],
   };
@@ -217,6 +219,7 @@ export function createInitialWorldState(): WorldState {
       mars: 1,
     },
     sensorBlindUntilSec: new Map(),
+    laserActiveUnitIds: new Set(),
     launchedDronesByCarrier: new Map(),
     routesByFaction: {
       earth: [],
