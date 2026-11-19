@@ -41,6 +41,18 @@ export interface InternalTrackRecord {
   isJammed: boolean;
 }
 
+export interface MunitionRuntimeMeta {
+  launchedAtSec: number;
+  maxFlightSec: number;
+  hp: number;
+  aimPos: Vec2;
+  aimVel: Vec2;
+  targetKind: 'unit' | 'munition';
+  seekerActive: boolean;
+  decoyDistractedId?: string;
+  interceptedAtTick?: number;
+}
+
 export interface FactionRuntimeState {
   resources: Record<ResourceType, number>;
   freighterCap: number;
@@ -54,6 +66,8 @@ export interface WorldState {
   celestials: readonly CelestialBody[];
   units: Map<string, UnitEntity>;
   munitions: Map<string, MunitionEntity>;
+  munitionMeta: Map<string, MunitionRuntimeMeta>;
+  nextMunitionSeqByFaction: Record<FactionId, number>;
   tracksByFaction: Record<FactionId, SensorTrack[]>;
   trackMemoryByFaction: Record<FactionId, Map<string, InternalTrackRecord>>;
   nextTrackSeqByFaction: Record<FactionId, number>;
@@ -206,6 +220,11 @@ export function createInitialWorldState(): WorldState {
     celestials: SOLAR_SYSTEM_BODIES,
     units: new Map(initialUnits.map((u) => [u.id, u])),
     munitions: new Map(),
+    munitionMeta: new Map(),
+    nextMunitionSeqByFaction: {
+      earth: 1,
+      mars: 1,
+    },
     tracksByFaction: {
       earth: [],
       mars: [],
