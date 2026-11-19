@@ -18,6 +18,7 @@ import {
   isUnitThermallyLockedOut,
 } from '../systems/combat.js';
 import { createSensorTickSystem } from '../systems/sensors.js';
+import { createLogisticsTickSystem } from '../systems/logistics.js';
 
 export interface TickSystemContext {
   world: WorldState;
@@ -43,7 +44,7 @@ export class SimulationLoop {
   public readonly dtSec: number;
   public readonly irByUnit = new Map<string, number>();
   private readonly systems: TickSystemHook[];
-  private postSensorCount = 0;
+  private postSensorCount = 1;
   private readonly onTick?: (world: WorldState) => void;
   private timer: ReturnType<typeof setInterval> | null = null;
 
@@ -64,6 +65,7 @@ export class SimulationLoop {
       ...(options.systems ?? []),
       createThermalTickSystem(this.irByUnit),
       createSensorTickSystem(this.irByUnit),
+      createLogisticsTickSystem(),
     ];
     this.onTick = options.onTick;
   }
