@@ -25,7 +25,7 @@ import {
   type ApsisPositions,
 } from './orbitDragMath.js';
 
-export type CommandInteractionMode = 'select' | 'orbit_insertion' | 'intercept';
+export type CommandInteractionMode = 'select' | 'orbit_insertion' | 'intercept' | 'fire';
 
 export interface InterceptTargetRef {
   refId: string;

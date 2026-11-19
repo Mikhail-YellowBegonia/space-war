@@ -1,14 +1,19 @@
 import {
+  MUNITION_CONFIGS,
   UNIT_CONFIGS,
   type FactionId,
   type FactionSnapshot,
+  type MunitionProfileId,
   type TransferMode,
   type UnitEntity,
 } from '@space-war/shared';
-import type {
-  CommandInteractionMode,
-  OrbitInteractionManager,
-  OrbitInteractionState,
+import {
+  FireControlManager,
+  isTrackTargetableForFire,
+  type CommandInteractionMode,
+  type FireControlState,
+  type OrbitInteractionManager,
+  type OrbitInteractionState,
 } from '../interaction/index.js';
 import type { IWorldProvider, WsStatusInfo } from '../net/index.js';
 import {
@@ -35,6 +40,7 @@ export interface OrbitCommandHudOptions {
   root: HTMLElement;
   provider: IWorldProvider;
   interaction: OrbitInteractionManager;
+  fireControl?: FireControlManager;
   onResetCamera?: () => void;
   connection?: HudConnectionConfig;
 }
@@ -61,25 +67,32 @@ export class OrbitCommandHud {
   private readonly root: HTMLElement;
   private provider: IWorldProvider;
   private interaction: OrbitInteractionManager;
+  private fireControl: FireControlManager;
+  private readonly ownsFireControl: boolean;
   private readonly unitController: UnitControlPanelController;
   private readonly onResetCamera?: () => void;
   private connection?: HudConnectionConfig;
 
   private snapshot: FactionSnapshot;
   private interactionState: OrbitInteractionState;
+  private fireState: FireControlState;
   private unsubProvider: () => void;
   private unsubInteraction: () => void;
+  private unsubFireControl: () => void;
 
   constructor(options: OrbitCommandHudOptions) {
     this.root = options.root;
     this.provider = options.provider;
     this.interaction = options.interaction;
+    this.ownsFireControl = !options.fireControl;
+    this.fireControl = options.fireControl ?? new FireControlManager(this.provider);
     this.unitController = new UnitControlPanelController(this.provider);
     this.onResetCamera = options.onResetCamera;
     this.connection = options.connection;
 
     this.snapshot = this.provider.getSnapshot();
     this.interactionState = this.interaction.getState();
+    this.fireState = this.fireControl.getState();
 
     this.root.addEventListener('click', this.handleClick);
     this.root.addEventListener('change', this.handleInputChange);
@@ -89,6 +102,10 @@ export class OrbitCommandHud {
     });
     this.unsubInteraction = this.interaction.subscribe((state) => {
       this.interactionState = state;
+      this.render();
+    });
+    this.unsubFireControl = this.fireControl.subscribe((state) => {
+      this.fireState = state;
       this.render();
     });
 
@@ -102,16 +119,24 @@ export class OrbitCommandHud {
     provider: IWorldProvider,
     interaction: OrbitInteractionManager,
     connection?: HudConnectionConfig,
+    fireControl?: FireControlManager,
   ): void {
     this.unsubProvider();
     this.unsubInteraction();
+    this.unsubFireControl();
     this.provider = provider;
     this.interaction = interaction;
+    if (fireControl) {
+      this.fireControl = fireControl;
+    } else {
+      this.fireControl.setProvider(provider);
+    }
     this.unitController.setProvider(provider);
     this.connection = connection;
 
     this.snapshot = this.provider.getSnapshot();
     this.interactionState = this.interaction.getState();
+    this.fireState = this.fireControl.getState();
 
     this.unsubProvider = this.provider.subscribe((snap) => {
       this.snapshot = snap;
@@ -119,6 +144,10 @@ export class OrbitCommandHud {
     });
     this.unsubInteraction = this.interaction.subscribe((state) => {
       this.interactionState = state;
+      this.render();
+    });
+    this.unsubFireControl = this.fireControl.subscribe((state) => {
+      this.fireState = state;
       this.render();
     });
     this.render();
@@ -136,6 +165,10 @@ export class OrbitCommandHud {
     this.root.removeEventListener('change', this.handleInputChange);
     this.unsubProvider();
     this.unsubInteraction();
+    this.unsubFireControl();
+    if (this.ownsFireControl) {
+      this.fireControl.dispose();
+    }
   }
 
   private readonly handleInputChange = (event: Event): void => {
@@ -251,6 +284,35 @@ export class OrbitCommandHud {
         if (unitId && droneKind) {
           void this.unitController.launchDrone(unitId, droneKind);
         }
+        break;
+      }
+      case 'fire-profile': {
+        const profileId = actionEl.dataset.profileId as MunitionProfileId | undefined;
+        if (profileId) this.fireControl.setProfileId(profileId);
+        break;
+      }
+      case 'fire-salvo': {
+        const count = Number(actionEl.dataset.count);
+        if (Number.isFinite(count)) this.fireControl.setSalvoCount(count);
+        break;
+      }
+      case 'fire-cold-coast': {
+        this.fireControl.setColdCoast(!this.fireState.coldCoast);
+        break;
+      }
+      case 'fire-pick-track': {
+        const trackId = actionEl.dataset.trackId;
+        if (trackId) this.fireControl.selectTargetTrack(trackId);
+        break;
+      }
+      case 'fire-execute': {
+        const shooter = this.interaction.getSelectedUnit();
+        void this.fireControl.fireAtSelectedTargets(shooter);
+        break;
+      }
+      case 'fire-intercept-incoming': {
+        const shooter = this.interaction.getSelectedUnit();
+        void this.fireControl.assignInterceptorsToIncoming(shooter);
         break;
       }
     }
@@ -408,16 +470,81 @@ export class OrbitCommandHud {
           ${modeBtn('select', '选择', '1')}
           ${modeBtn('orbit_insertion', '进入轨道', '2')}
           ${modeBtn('intercept', '交会拦截', '3')}
+          ${modeBtn('fire', '武器火控', '4')}
           <button class="cic-btn" data-action="reset-camera">[0] 复位视角</button>
         </div>
         ${modeDetailHtml}
+        ${this.renderEngagementAdvisories()}
         ${statusLine}
       </div>
       <div class="cic-unit-dock">${unitButtonsHtml}</div>
       ${this.renderUnitControlTerminal()}
+      ${this.renderFireControlPanel(selectedUnit)}
       ${cardsHtml}
       ${modalHtml}
     `;
+  }
+
+  private renderEngagementAdvisories(): string {
+    const { advisories } = this.fireState;
+    if (advisories.length === 0) return '';
+    const incomingCount = advisories.filter((a) => a.kind === 'incoming_munition').length;
+    const brawlCount = advisories.filter((a) => a.kind === 'close_range_brawl').length;
+    const laserCount = advisories.filter((a) => a.kind === 'laser_envelope').length;
+
+    const parts: string[] = [];
+    if (incomingCount > 0) parts.push(`⚠ 来袭弹药威胁 (${incomingCount})`);
+    if (brawlCount > 0) parts.push(`⚔ 近战交会告警 (${brawlCount})`);
+    if (laserCount > 0) parts.push(`✦ 激光射程内目标 (${laserCount})`);
+
+    return `<div class="cic-alert">${escapeHtml(parts.join(' · '))}</div>`;
+  }
+
+  private renderFireControlPanel(selectedUnit: UnitEntity | null): string {
+    if (
+      this.interactionState.mode !== 'fire' &&
+      this.fireState.selectedTargetTrackIds.length === 0
+    ) {
+      return '';
+    }
+    if (this.interactionState.options) {
+      return '';
+    }
+
+    const targetableTracks = this.snapshot.tracks.filter(isTrackTargetableForFire);
+    const incomingCount = targetableTracks.filter((t) => t.suspectedKind === 'munition').length;
+    const selectedSet = new Set(this.fireState.selectedTargetTrackIds);
+    const canColdCoast = MUNITION_CONFIGS[this.fireState.profileId].canColdCoast;
+
+    const trackButtons = targetableTracks
+      .map((t) => {
+        const isIncoming = t.suspectedKind === 'munition';
+        return `<button class="cic-mini-btn ${selectedSet.has(t.trackId) ? 'active' : ''} ${isIncoming ? 'threat' : ''}" data-action="fire-pick-track" data-track-id="${escapeHtml(t.trackId)}">
+          ${isIncoming ? '⚠ ' : ''}${escapeHtml(t.trackId)} (${t.confidence})
+        </button>`;
+      })
+      .join('');
+
+    return `<section class="cic-panel cic-fire-panel">
+      <div class="panel-title">
+        <span>BVR 武器火控 // ${selectedUnit ? `${escapeHtml(selectedUnit.id)} (弹药 ${selectedUnit.ammoStock})` : '未选舰'}</span>
+      </div>
+      <div class="cic-hint">在星图上点击目标或拖拽框选来袭弹药航迹 · 快捷键 [F] 齐射</div>
+      <div class="fire-controls-row">
+        <button class="cic-mini-btn ${this.fireState.profileId === 'light_interceptor' ? 'active' : ''}" data-action="fire-profile" data-profile-id="light_interceptor">轻型拦截弹</button>
+        <button class="cic-mini-btn ${this.fireState.profileId === 'heavy_torpedo' ? 'active' : ''}" data-action="fire-profile" data-profile-id="heavy_torpedo">重型鱼雷</button>
+        <button class="cic-mini-btn ${this.fireState.salvoCount === 1 ? 'active' : ''}" data-action="fire-salvo" data-count="1">x1</button>
+        <button class="cic-mini-btn ${this.fireState.salvoCount === 2 ? 'active' : ''}" data-action="fire-salvo" data-count="2">x2</button>
+        <button class="cic-mini-btn ${this.fireState.salvoCount === 4 ? 'active' : ''}" data-action="fire-salvo" data-count="4">x4</button>
+        <button class="cic-mini-btn ${this.fireState.coldCoast ? 'active' : ''}" data-action="fire-cold-coast" ${canColdCoast ? '' : 'disabled'}>冷漂 ${this.fireState.coldCoast ? 'ON' : 'OFF'}</button>
+      </div>
+      <div class="fire-targets">${trackButtons || '<span class="chip-meta">暂无可火控航迹</span>'}</div>
+      ${this.fireState.lastFireMessage ? `<div class="cic-status">${escapeHtml(this.fireState.lastFireMessage)}</div>` : ''}
+      <div class="panel-actions fire-actions">
+        ${incomingCount > 0 ? `<button class="cic-btn" data-action="fire-intercept-incoming">一键反导拦截 (${incomingCount})</button>` : ''}
+        <button class="cic-exec-btn" data-action="fire-execute" ${selectedUnit && selectedUnit.ammoStock > 0 && this.fireState.selectedTargetTrackIds.length > 0 ? '' : 'disabled'}>发射齐射 [F]</button>
+      </div>
+    </section>`;
   }
 
   private renderUnitControlTerminal(): string {

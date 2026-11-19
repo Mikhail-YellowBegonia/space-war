@@ -1,6 +1,7 @@
 import {
   CELESTIAL_BODIES_BY_ID,
   LOGISTICS_CONFIG,
+  MUNITION_CONFIGS,
   SIM_TICK_RATE_HZ,
   SOLAR_SYSTEM_BODIES,
   UNIT_CONFIGS,
@@ -11,12 +12,14 @@ import {
   orbitToState,
   solveInterceptTransfer,
   solveOrbitInsertion,
+  stateToOrbit,
   type CelestialBody,
   type FactionId,
   type FactionSnapshot,
   type InterceptTarget,
   type KeplerOrbit,
   type LogisticsRoute,
+  type MunitionEntity,
   type PlayerCommand,
   type PropulsionType,
   type ResupplyPoint,
@@ -122,10 +125,13 @@ export class MockWorldProvider implements IWorldProvider {
   private gameTimeSec = 0;
   private readonly bodies: readonly CelestialBody[] = SOLAR_SYSTEM_BODIES;
   private readonly units = new Map<string, UnitEntity>();
+  private readonly munitions = new Map<string, MunitionEntity>();
+  private readonly interceptedTrackIds = new Set<string>();
   private readonly routes: LogisticsRoute[] = [];
   private readonly ownWonder: WonderSlot[] = createInitialWonderSlots();
   private readonly launchedDronesByCarrier = new Map<string, number>();
   private nextDroneSeq = 1;
+  private nextMunitionSeq = 1;
   private vfxEvents: VfxEvent[] = [];
   private timerId: ReturnType<typeof setInterval> | null = null;
   private scriptedRaiderOrbit: KeplerOrbit = {
@@ -181,6 +187,12 @@ export class MockWorldProvider implements IWorldProvider {
         faction: this.faction,
         kind: 'cruiser',
         orbit: { ...homeOrbit, a: homeOrbit.a + 0.06, meanAnomaly0: homeOrbit.meanAnomaly0 + 0.02 },
+      }),
+      createMockUnit({
+        id: isEarth ? 'E-ESC-1' : 'M-ESC-1',
+        faction: this.faction,
+        kind: 'escort_frigate',
+        orbit: { ...homeOrbit, a: homeOrbit.a + 0.03, meanAnomaly0: homeOrbit.meanAnomaly0 - 0.015 },
       }),
       createMockUnit({
         id: isEarth ? 'E-TNK-1' : 'M-TNK-1',
@@ -278,8 +290,70 @@ export class MockWorldProvider implements IWorldProvider {
       }
     }
 
+    const tEnd = tStart + dtSec;
+    const trackMap = new Map(this.buildScriptedTracks().map((t) => [t.trackId, t]));
+
+    for (const [munId, mun] of this.munitions.entries()) {
+      if (mun.intercepted) continue;
+      const targetTrack = trackMap.get(mun.targetId);
+      const nextState = orbitToState(mun.orbit, tEnd);
+      const pos = nextState.pos;
+      let vel = nextState.vel;
+      let orbit = mun.orbit;
+      let deltaV = mun.deltaV;
+      let coldCoast = mun.coldCoast;
+
+      if (targetTrack?.pos && deltaV > 0) {
+        const dx = targetTrack.pos.x - pos.x;
+        const dy = targetTrack.pos.y - pos.y;
+        const dist = Math.hypot(dx, dy);
+
+        if (dist <= 0.015) {
+          this.munitions.set(munId, { ...mun, pos, vel, intercepted: true });
+          if (targetTrack.suspectedKind === 'munition') {
+            this.interceptedTrackIds.add(targetTrack.trackId);
+          }
+          events.push({
+            kind: targetTrack.suspectedKind === 'munition' ? 'ciws' : 'explosion',
+            from: { ...pos },
+            intensity: 0.9,
+          });
+          continue;
+        }
+
+        // Terminal active guidance (or active mid-course for non-cold-coast interceptors)
+        if (!coldCoast || dist <= MUNITION_CONFIGS[mun.profileId].seekerRangeAu) {
+          coldCoast = false;
+          const cfg = MUNITION_CONFIGS[mun.profileId];
+          const maxStepDv = Math.min(deltaV, cfg.maxAccelAuPerSec2 * dtSec);
+          const targetVel = targetTrack.vel ?? { x: 0, y: 0 };
+          const closureSpeed = Math.min(0.004, Math.max(0.002, dist * 0.08));
+          const desiredVx = targetVel.x + (dx / dist) * closureSpeed;
+          const desiredVy = targetVel.y + (dy / dist) * closureSpeed;
+          const dvx = desiredVx - vel.x;
+          const dvy = desiredVy - vel.y;
+          const dvMag = Math.hypot(dvx, dvy);
+          if (dvMag > 1e-8 && maxStepDv > 0) {
+            const scale = Math.min(1, maxStepDv / dvMag);
+            vel = { x: vel.x + dvx * scale, y: vel.y + dvy * scale };
+            deltaV = Math.max(0, deltaV - dvMag * scale);
+            orbit = stateToOrbit(pos, vel, tEnd);
+          }
+        }
+      }
+
+      this.munitions.set(munId, {
+        ...mun,
+        pos,
+        vel,
+        orbit,
+        deltaV,
+        coldCoast,
+      });
+    }
+
     this.tick += 1;
-    this.gameTimeSec = tStart + dtSec;
+    this.gameTimeSec = tEnd;
     this.vfxEvents = events;
     this.emitSnapshot();
   }
@@ -351,7 +425,7 @@ export class MockWorldProvider implements IWorldProvider {
     const reconHome = this.units.get(this.faction === 'earth' ? 'E-HOME' : 'M-HOME');
     const originPos = reconHome ? { ...reconHome.pos } : { x: 1, y: 0 };
 
-    return [
+    const tracks: SensorTrack[] = [
       {
         trackId: `trk-${enemyFaction}-home`,
         confidence: 'confirmed',
@@ -407,6 +481,42 @@ export class MockWorldProvider implements IWorldProvider {
         isJammed: false,
       },
     ];
+
+    // Scripted incoming enemy munition tracks near friendly space for SW-17 anti-missile interception
+    const homeBaseOrbit =
+      this.faction === 'earth'
+        ? CELESTIAL_BODIES_BY_ID.earth!.orbit!
+        : CELESTIAL_BODIES_BY_ID.mars!.orbit!;
+    const incomingSalvoSpecs: Array<{ id: string; da: number; dm: number; conf: 'confirmed' | 'uncertain' }> = [
+      { id: `trk-${enemyFaction}-torp-1`, da: 0.05, dm: 0.04, conf: 'confirmed' },
+      { id: `trk-${enemyFaction}-torp-2`, da: 0.06, dm: 0.055, conf: 'uncertain' },
+    ];
+    for (const spec of incomingSalvoSpecs) {
+      if (this.interceptedTrackIds.has(spec.id)) continue;
+      const torpOrbit: KeplerOrbit = {
+        a: homeBaseOrbit.a + spec.da,
+        e: 0.06,
+        omega: homeBaseOrbit.omega,
+        meanAnomaly0: homeBaseOrbit.meanAnomaly0 + spec.dm,
+        epochSec: 0,
+      };
+      const torpState = orbitToState(torpOrbit, this.gameTimeSec);
+      tracks.push({
+        trackId: spec.id,
+        confidence: spec.conf,
+        suspectedKind: 'munition',
+        pos: torpState.pos,
+        vel: torpState.vel,
+        ...(spec.conf === 'uncertain'
+          ? { errorRadiusMajorAu: 0.03, errorRadiusMinorAu: 0.015, errorAngleRad: 0.25 }
+          : {}),
+        estimatedOrbit: torpOrbit,
+        lastObservedSec: this.gameTimeSec,
+        isJammed: false,
+      });
+    }
+
+    return tracks;
   }
 
   getSnapshot(): FactionSnapshot {
@@ -430,7 +540,14 @@ export class MockWorldProvider implements IWorldProvider {
       freightersInFlight: 1,
       celestials,
       ownUnits,
-      ownMunitions: [],
+      ownMunitions: Array.from(this.munitions.values())
+        .filter((m) => !m.intercepted)
+        .map((m) => ({
+          ...m,
+          pos: { ...m.pos },
+          vel: { ...m.vel },
+          orbit: { ...m.orbit },
+        })),
       tracks: this.buildScriptedTracks(),
       routes: this.routes.map((r) => ({ ...r, escortUnitIds: [...r.escortUnitIds] })),
       ownWonder: this.ownWonder.map((slot) => ({ ...slot })),
@@ -598,6 +715,73 @@ export class MockWorldProvider implements IWorldProvider {
         }
         this.units.set(droneId, drone);
         this.launchedDronesByCarrier.set(carrier.id, used + 1);
+        this.emitSnapshot();
+        return { accepted: true };
+      }
+
+      case 'fire_munition': {
+        const shooter = this.units.get(command.unitId);
+        if (!shooter) {
+          return { accepted: false, reason: `Unknown unit: ${command.unitId}` };
+        }
+        if (shooter.hp <= 0 || shooter.subsystems.weapons === 'offline') {
+          return { accepted: false, reason: 'Weapons offline or unit destroyed' };
+        }
+        const count = Math.max(1, Math.floor(command.count));
+        if (shooter.ammoStock < count) {
+          return { accepted: false, reason: 'Insufficient ammo stock' };
+        }
+        const targetTrack = this.buildScriptedTracks().find(
+          (t) => t.trackId === command.targetTrackId,
+        );
+        if (
+          !targetTrack ||
+          (targetTrack.confidence !== 'confirmed' && targetTrack.confidence !== 'uncertain') ||
+          !targetTrack.pos
+        ) {
+          return { accepted: false, reason: 'Target track is not confirmed or uncertain' };
+        }
+
+        const cfg = MUNITION_CONFIGS[command.profileId];
+        const coldCoast = cfg.canColdCoast ? command.coldCoast : false;
+        const dx = targetTrack.pos.x - shooter.pos.x;
+        const dy = targetTrack.pos.y - shooter.pos.y;
+        const dist = Math.max(1e-6, Math.hypot(dx, dy));
+        const ux = dx / dist;
+        const uy = dy / dist;
+
+        for (let i = 0; i < count; i++) {
+          const spreadAngle = (i - (count - 1) * 0.5) * 0.08;
+          const cosS = Math.cos(spreadAngle);
+          const sinS = Math.sin(spreadAngle);
+          const dirX = ux * cosS - uy * sinS;
+          const dirY = ux * sinS + uy * cosS;
+          const boost = Math.min(cfg.maxDeltaV * 0.2, 0.0015);
+          const vel = {
+            x: shooter.vel.x + dirX * boost,
+            y: shooter.vel.y + dirY * boost,
+          };
+          const orbit = stateToOrbit(shooter.pos, vel, this.gameTimeSec);
+          const munId = `mun-${this.nextMunitionSeq++}`;
+          this.munitions.set(munId, {
+            id: munId,
+            faction: this.faction,
+            profileId: command.profileId,
+            pos: { ...shooter.pos },
+            vel,
+            orbit,
+            deltaV: Math.max(0, cfg.maxDeltaV - boost),
+            targetId: command.targetTrackId,
+            seekerMode: cfg.defaultSeekerMode,
+            coldCoast,
+            intercepted: false,
+          });
+        }
+
+        this.units.set(shooter.id, {
+          ...shooter,
+          ammoStock: shooter.ammoStock - count,
+        });
         this.emitSnapshot();
         return { accepted: true };
       }

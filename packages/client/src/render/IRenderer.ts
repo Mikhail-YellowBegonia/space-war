@@ -1,12 +1,14 @@
 import type {
   CelestialBody,
   KeplerOrbit,
+  MunitionEntity,
   SensorTrack,
   TransferOption,
   UnitEntity,
   Vec2,
 } from '@space-war/shared';
 import type { Camera2D } from '../camera/index.js';
+import type { EngagementAdvisory, ScreenBoxRect } from '../interaction/fireControlMath.js';
 
 /**
  * Minimal Canvas2D drawing interface compatible with browser `CanvasRenderingContext2D`
@@ -56,10 +58,14 @@ export interface RenderFrameState {
   camera: Camera2D;
   bodies: readonly CelestialBody[];
   units: readonly UnitEntity[];
+  ownMunitions?: readonly MunitionEntity[];
   tracks?: readonly SensorTrack[];
   selectedUnitId?: string | null;
+  selectedTargetTrackIds?: readonly string[];
   focusedBodyId?: string | null;
   previewTransfer?: TransferPreviewRenderData | null;
+  boxSelectRect?: ScreenBoxRect | null;
+  engagementAdvisories?: readonly EngagementAdvisory[];
 }
 
 export interface IRenderer {

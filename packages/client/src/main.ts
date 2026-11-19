@@ -1,7 +1,7 @@
 import { SOLAR_SYSTEM_BODIES, type FactionId } from '@space-war/shared';
 import { getClientBootBanner } from './app.js';
 import { Camera2D, CameraController } from './camera/index.js';
-import { OrbitInteractionManager } from './interaction/index.js';
+import { FireControlManager, OrbitInteractionManager } from './interaction/index.js';
 import {
   MockWorldProvider,
   WsWorldProvider,
@@ -51,6 +51,7 @@ function bootstrapClient(): void {
 
   let provider: IWorldProvider;
   let interaction: OrbitInteractionManager;
+  let fireControl: FireControlManager;
   let unsubWsStatus: (() => void) | null = null;
   let hud: OrbitCommandHud | null = null;
 
@@ -58,7 +59,7 @@ function bootstrapClient(): void {
     mode: 'mock' | 'ws',
     roomId: string,
     faction: FactionId,
-  ): { provider: IWorldProvider; interaction: OrbitInteractionManager } => {
+  ): { provider: IWorldProvider; interaction: OrbitInteractionManager; fireControl: FireControlManager } => {
     currentMode = mode;
     currentRoomId = roomId;
     currentFaction = faction;
@@ -75,6 +76,7 @@ function bootstrapClient(): void {
       return {
         provider: wsProvider,
         interaction: new OrbitInteractionManager(wsProvider, SOLAR_SYSTEM_BODIES),
+        fireControl: new FireControlManager(wsProvider),
       };
     }
 
@@ -82,6 +84,7 @@ function bootstrapClient(): void {
     return {
       provider: mockProvider,
       interaction: new OrbitInteractionManager(mockProvider, SOLAR_SYSTEM_BODIES),
+      fireControl: new FireControlManager(mockProvider),
     };
   };
 
@@ -100,18 +103,21 @@ function bootstrapClient(): void {
   ): void => {
     unsubWsStatus?.();
     unsubWsStatus = null;
+    fireControl.dispose();
     interaction.dispose();
     provider.dispose();
 
     const next = createSession(nextMode, roomId, faction);
     provider = next.provider;
     interaction = next.interaction;
-    hud?.rebind(provider, interaction, buildConnectionConfig());
+    fireControl = next.fireControl;
+    hud?.rebind(provider, interaction, buildConnectionConfig(), fireControl);
   };
 
   const initialSession = createSession(currentMode, currentRoomId, currentFaction);
   provider = initialSession.provider;
   interaction = initialSession.interaction;
+  fireControl = initialSession.fireControl;
 
   const camera = new Camera2D({
     center: { x: 0, y: 0 },
@@ -146,6 +152,7 @@ function bootstrapClient(): void {
         root: hudRoot,
         provider,
         interaction,
+        fireControl,
         onResetCamera: () => camera.resetOverview(),
         connection: buildConnectionConfig(),
       })
@@ -160,23 +167,43 @@ function bootstrapClient(): void {
   };
 
   let leftDragging = false;
+  let boxSelecting = false;
 
   const handlePointerDown = (event: PointerEvent): void => {
     if (event.button !== 0) {
       return;
     }
-    leftDragging = interaction.beginPointerAction(getLocalPoint(event), camera);
+    const local = getLocalPoint(event);
+    if (interaction.getState().mode === 'fire' || event.shiftKey) {
+      boxSelecting = true;
+      fireControl.beginTargetBoxOrPick(local);
+      return;
+    }
+    leftDragging = interaction.beginPointerAction(local, camera);
   };
 
   const handlePointerMove = (event: PointerEvent): void => {
+    const local = getLocalPoint(event);
+    if (boxSelecting) {
+      fireControl.updateTargetBoxDrag(local);
+      return;
+    }
     if (!leftDragging) {
       return;
     }
-    interaction.updatePointerDrag(getLocalPoint(event), camera);
+    interaction.updatePointerDrag(local, camera);
   };
 
   const handlePointerUp = (event: PointerEvent): void => {
-    if (event.button !== 0 || !leftDragging) {
+    if (event.button !== 0) {
+      return;
+    }
+    if (boxSelecting) {
+      boxSelecting = false;
+      fireControl.endTargetBoxOrPick(getLocalPoint(event), camera);
+      return;
+    }
+    if (!leftDragging) {
       return;
     }
     leftDragging = false;
@@ -196,6 +223,10 @@ function bootstrapClient(): void {
       interaction.setMode('orbit_insertion');
     } else if (event.key === '3') {
       interaction.setMode('intercept');
+    } else if (event.key === '4') {
+      interaction.setMode('fire');
+    } else if (event.key === 'f' || event.key === 'F') {
+      void fireControl.fireAtSelectedTargets(interaction.getSelectedUnit());
     } else if (event.key === 'Enter') {
       void interaction.requestExecute();
     } else if (event.key === 'Escape') {
@@ -217,6 +248,7 @@ function bootstrapClient(): void {
     unsubWsStatus?.();
     cameraController.dispose();
     hud?.dispose();
+    fireControl.dispose();
     interaction.dispose();
     provider.dispose();
     canvas.removeEventListener('pointerdown', handlePointerDown);
@@ -232,6 +264,7 @@ function bootstrapClient(): void {
   const renderLoop = (): void => {
     const snap = provider.getSnapshot();
     const uiState = interaction.getState();
+    const fireState = fireControl.getState();
     const chosenOption = interaction.getSelectedOption();
 
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -242,9 +275,13 @@ function bootstrapClient(): void {
       camera,
       bodies: SOLAR_SYSTEM_BODIES,
       units: snap.ownUnits,
+      ownMunitions: snap.ownMunitions,
       tracks: snap.tracks,
       selectedUnitId: uiState.selectedUnitId,
+      selectedTargetTrackIds: fireState.selectedTargetTrackIds,
       focusedBodyId: uiState.interceptTarget?.refId ?? null,
+      boxSelectRect: fireState.boxSelectRect,
+      engagementAdvisories: fireState.advisories,
       previewTransfer: chosenOption
         ? {
             option: chosenOption,

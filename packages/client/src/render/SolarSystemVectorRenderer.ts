@@ -6,6 +6,7 @@ import {
   type CelestialBody,
   type FactionId,
   type KeplerOrbit,
+  type MunitionEntity,
   type SensorTrack,
   type UnitEntity,
   type UnitKind,
@@ -172,15 +173,35 @@ export class SolarSystemVectorRenderer implements IRenderer {
     }
 
     // 7b. 4-tier situational awareness enemy sensor tracks & ECM noise rings
+    const selectedTargetSet = new Set(frame.selectedTargetTrackIds ?? []);
     if (frame.tracks) {
       for (const track of frame.tracks) {
-        this.drawTrackMarker(track, frame, pixelsPerAu);
+        this.drawTrackMarker(track, frame, pixelsPerAu, selectedTargetSet.has(track.trackId));
       }
+    }
+
+    // 7b-2. Friendly in-flight munitions
+    if (frame.ownMunitions) {
+      for (const mun of frame.ownMunitions) {
+        if (!mun.intercepted) {
+          this.drawMunitionMarker(mun, frame);
+        }
+      }
+    }
+
+    // 7b-3. Close-range brawl & incoming munition advisories
+    if (frame.engagementAdvisories && frame.engagementAdvisories.length > 0) {
+      this.drawEngagementAdvisories(frame);
     }
 
     // 7c. Active transfer preview arcs, draft orbit, and draggable apsis handles
     if (frame.previewTransfer) {
       this.drawTransferPreview(frame.previewTransfer, frame);
+    }
+
+    // 7d. Box-selection marquee for anti-missile / target assignment
+    if (frame.boxSelectRect) {
+      this.drawBoxSelectRect(frame.boxSelectRect);
     }
 
     // 8. Scale bar overlay
@@ -768,12 +789,29 @@ export class SolarSystemVectorRenderer implements IRenderer {
       }
       ctx.restore();
     }
+
+    // Short-range laser / point-defense envelope circle for selected or escort units
+    const laserRangeAu = UNIT_CONFIGS[unit.kind].weapons.laserRangeAu;
+    if (laserRangeAu > 0 && (unit.id === frame.selectedUnitId || frame.camera.getSemanticZoomTier() !== 'strategic')) {
+      const laserPx = laserRangeAu * pixelsPerAu;
+      if (laserPx >= 5) {
+        ctx.save();
+        ctx.strokeStyle = 'rgba(255, 96, 128, 0.36)';
+        ctx.lineWidth = 1;
+        ctx.setLineDash([3, 4]);
+        ctx.beginPath();
+        ctx.arc(unitScreen.x, unitScreen.y, laserPx, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.restore();
+      }
+    }
   }
 
   private drawTrackMarker(
     track: SensorTrack,
     frame: RenderFrameState,
     pixelsPerAu: number,
+    isTargetSelected = false,
   ): void {
     const { ctx } = this;
     const { camera, viewportWidth: w, viewportHeight: h, gameTimeSec } = frame;
@@ -888,8 +926,22 @@ export class SolarSystemVectorRenderer implements IRenderer {
       ctx.font = '10px ui-monospace, SFMono-Regular, Menlo, monospace';
       ctx.textAlign = 'left';
       ctx.textBaseline = 'middle';
-      const label = track.isJammed ? `[JAMMED] ${track.trackId}` : `[UNC] ${track.trackId}`;
-      ctx.fillText(label, centerScreen.x + 12, centerScreen.y);
+      const prefix =
+        track.suspectedKind === 'munition'
+          ? '[MSL]'
+          : track.isJammed
+            ? '[JAMMED]'
+            : '[UNC]';
+      ctx.fillText(`${prefix} ${track.trackId}`, centerScreen.x + 12, centerScreen.y);
+
+      if (isTargetSelected) {
+        ctx.setLineDash([]);
+        ctx.strokeStyle = '#ff4d4f';
+        ctx.lineWidth = 1.6;
+        ctx.beginPath();
+        ctx.arc(centerScreen.x, centerScreen.y, 13, 0, Math.PI * 2);
+        ctx.stroke();
+      }
       ctx.restore();
       return;
     }
@@ -947,7 +999,16 @@ export class SolarSystemVectorRenderer implements IRenderer {
       ctx.font = '10px ui-monospace, SFMono-Regular, Menlo, monospace';
       ctx.textAlign = 'left';
       ctx.textBaseline = 'middle';
-      ctx.fillText(`[LOCK] ${track.trackId}`, screenPos.x + 11, screenPos.y);
+      const lockPrefix = track.suspectedKind === 'munition' ? '[MSL LOCK]' : '[LOCK]';
+      ctx.fillText(`${lockPrefix} ${track.trackId}`, screenPos.x + 11, screenPos.y);
+
+      if (isTargetSelected) {
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 1.4;
+        ctx.beginPath();
+        ctx.arc(screenPos.x, screenPos.y, 13, 0, Math.PI * 2);
+        ctx.stroke();
+      }
       ctx.restore();
       return;
     }
@@ -1095,6 +1156,83 @@ export class SolarSystemVectorRenderer implements IRenderer {
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText(label, screen.x, screen.y + 0.5);
+    ctx.restore();
+  }
+
+  private drawMunitionMarker(mun: MunitionEntity, frame: RenderFrameState): void {
+    const { ctx } = this;
+    const { camera, viewportWidth: w, viewportHeight: h } = frame;
+    const screen = camera.worldToScreen(mun.pos);
+    if (screen.x < -16 || screen.x > w + 16 || screen.y < -16 || screen.y > h + 16) {
+      return;
+    }
+
+    const speed = Math.hypot(mun.vel.x, mun.vel.y);
+    const ux = speed > 1e-8 ? mun.vel.x / speed : 1;
+    const uy = speed > 1e-8 ? mun.vel.y / speed : 0;
+
+    ctx.save();
+    ctx.strokeStyle = mun.coldCoast ? '#7df9ff' : '#ffd166';
+    ctx.fillStyle = mun.coldCoast ? '#7df9ff' : '#ff9f1c';
+    ctx.lineWidth = 1.5;
+
+    ctx.beginPath();
+    ctx.moveTo(screen.x + ux * 5, screen.y + uy * 5);
+    ctx.lineTo(screen.x - ux * 4 - uy * 2.5, screen.y - uy * 4 + ux * 2.5);
+    ctx.lineTo(screen.x - ux * 4 + uy * 2.5, screen.y - uy * 4 - ux * 2.5);
+    ctx.closePath();
+    ctx.fill();
+
+    if (!mun.coldCoast) {
+      ctx.beginPath();
+      ctx.moveTo(screen.x - ux * 4, screen.y - uy * 4);
+      ctx.lineTo(screen.x - ux * 11, screen.y - uy * 11);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  private drawEngagementAdvisories(frame: RenderFrameState): void {
+    const { ctx } = this;
+    const { camera, engagementAdvisories } = frame;
+    if (!engagementAdvisories) return;
+
+    const unitById = new Map(frame.units.map((u) => [u.id, u]));
+    const pulse = 0.45 + 0.4 * Math.sin(frame.gameTimeSec * 8);
+
+    for (const adv of engagementAdvisories) {
+      const unit = unitById.get(adv.ownUnitId);
+      if (!unit) continue;
+      const screen = camera.worldToScreen(unit.pos);
+
+      ctx.save();
+      ctx.strokeStyle =
+        adv.kind === 'close_range_brawl'
+          ? `rgba(255, 77, 79, ${pulse.toFixed(2)})`
+          : `rgba(255, 183, 3, ${pulse.toFixed(2)})`;
+      ctx.lineWidth = 1.6;
+      ctx.setLineDash([4, 3]);
+      ctx.beginPath();
+      ctx.arc(screen.x, screen.y, adv.kind === 'close_range_brawl' ? 18 : 22, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+    }
+  }
+
+  private drawBoxSelectRect(rect: NonNullable<RenderFrameState['boxSelectRect']>): void {
+    const { ctx } = this;
+    const x = Math.min(rect.x1, rect.x2);
+    const y = Math.min(rect.y1, rect.y2);
+    const w = Math.abs(rect.x2 - rect.x1);
+    const h = Math.abs(rect.y2 - rect.y1);
+
+    ctx.save();
+    ctx.fillStyle = 'rgba(125, 249, 255, 0.10)';
+    ctx.strokeStyle = '#7df9ff';
+    ctx.lineWidth = 1.2;
+    ctx.setLineDash([4, 3]);
+    ctx.fillRect(x, y, w, h);
+    ctx.strokeRect(x, y, w, h);
     ctx.restore();
   }
 }
