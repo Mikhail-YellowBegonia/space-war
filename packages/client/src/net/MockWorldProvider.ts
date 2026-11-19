@@ -7,6 +7,7 @@ import {
   WONDER_CONFIG,
   advanceUnitOrbit,
   getBodyStateAt,
+  isOccluded,
   orbitToState,
   solveInterceptTransfer,
   solveOrbitInsertion,
@@ -22,6 +23,7 @@ import {
   type SensorTrack,
   type UnitEntity,
   type UnitKind,
+  type Vec2,
   type VfxEvent,
   type WonderSlot,
 } from '@space-war/shared';
@@ -124,6 +126,14 @@ export class MockWorldProvider implements IWorldProvider {
   private readonly ownWonder: WonderSlot[] = createInitialWonderSlots();
   private vfxEvents: VfxEvent[] = [];
   private timerId: ReturnType<typeof setInterval> | null = null;
+  private scriptedRaiderOrbit: KeplerOrbit = {
+    a: 1.38,
+    e: 0.14,
+    omega: 0.32,
+    meanAnomaly0: 0.5,
+    epochSec: 0,
+  };
+  private raiderLastObservedSec = 0;
 
   constructor(options: MockWorldProviderOptions = {}) {
     this.faction = options.faction ?? 'earth';
@@ -179,6 +189,9 @@ export class MockWorldProvider implements IWorldProvider {
     ];
 
     for (const unit of seededUnits) {
+      if (unit.kind === 'recon_corvette') {
+        unit.ladarTargetAngle = 0.45;
+      }
       this.units.set(unit.id, unit);
     }
 
@@ -264,6 +277,24 @@ export class MockWorldProvider implements IWorldProvider {
     return sites;
   }
 
+  /**
+   * Allows tests or scenarios to reposition the scripted enemy raider orbit (e.g. behind an occluder).
+   */
+  setScriptedRaiderOrbit(orbit: KeplerOrbit): void {
+    this.scriptedRaiderOrbit = { ...orbit };
+    this.emitSnapshot();
+  }
+
+  private isPosVisibleToOwnUnits(targetPos: Vec2): boolean {
+    for (const unit of this.units.values()) {
+      if (unit.hp <= 0 || unit.subsystems.sensors === 'offline') continue;
+      if (!isOccluded(unit.pos, targetPos, this.bodies, this.gameTimeSec)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   private buildScriptedTracks(): SensorTrack[] {
     const enemyFaction: FactionId = this.faction === 'earth' ? 'mars' : 'earth';
     const enemyHomeBody = CELESTIAL_BODIES_BY_ID[enemyFaction]!;
@@ -276,14 +307,30 @@ export class MockWorldProvider implements IWorldProvider {
       : { a: 1.55, e: 0.09, omega: 0.2, meanAnomaly0: 0.8, epochSec: 0 };
     const enemyHomeState = orbitToState(enemyBaseOrbit, this.gameTimeSec);
 
-    const raiderOrbit: KeplerOrbit = {
-      a: 1.38,
-      e: 0.14,
-      omega: 0.32,
-      meanAnomaly0: 0.5,
+    const raiderState = orbitToState(this.scriptedRaiderOrbit, this.gameTimeSec);
+    const raiderVisible = this.isPosVisibleToOwnUnits(raiderState.pos);
+    if (raiderVisible) {
+      this.raiderLastObservedSec = this.gameTimeSec;
+    }
+
+    const jammedEscortOrbit: KeplerOrbit = {
+      a: 1.46,
+      e: 0.08,
+      omega: 0.28,
+      meanAnomaly0: 0.62,
       epochSec: 0,
     };
-    const raiderState = orbitToState(raiderOrbit, this.gameTimeSec);
+    const jammedEscortState = orbitToState(jammedEscortOrbit, this.gameTimeSec);
+
+    const ghostPatrolOrbit: KeplerOrbit = {
+      a: 2.05,
+      e: 0.12,
+      omega: 2.8,
+      meanAnomaly0: 0.2,
+      epochSec: 0,
+    };
+    const ghostPatrolState = orbitToState(ghostPatrolOrbit, this.gameTimeSec);
+
     const reconHome = this.units.get(this.faction === 'earth' ? 'E-HOME' : 'M-HOME');
     const originPos = reconHome ? { ...reconHome.pos } : { x: 1, y: 0 };
 
@@ -300,15 +347,37 @@ export class MockWorldProvider implements IWorldProvider {
       },
       {
         trackId: `trk-${enemyFaction}-raider`,
-        confidence: 'uncertain',
+        confidence: raiderVisible ? 'uncertain' : 'ghost',
         suspectedKind: 'ship',
         pos: raiderState.pos,
         vel: raiderState.vel,
         errorRadiusMajorAu: 0.08,
         errorRadiusMinorAu: 0.035,
         errorAngleRad: 0.4,
-        estimatedOrbit: raiderOrbit,
-        lastObservedSec: Math.max(0, this.gameTimeSec - 4),
+        estimatedOrbit: this.scriptedRaiderOrbit,
+        lastObservedSec: this.raiderLastObservedSec,
+        isJammed: false,
+      },
+      {
+        trackId: `trk-${enemyFaction}-jammed-escort`,
+        confidence: 'uncertain',
+        suspectedKind: 'ship',
+        pos: jammedEscortState.pos,
+        vel: jammedEscortState.vel,
+        errorRadiusMajorAu: 0.14,
+        errorRadiusMinorAu: 0.07,
+        errorAngleRad: 0.9,
+        lastObservedSec: this.gameTimeSec,
+        isJammed: true,
+      },
+      {
+        trackId: `trk-${enemyFaction}-ghost-patrol`,
+        confidence: 'ghost',
+        suspectedKind: 'freighter',
+        pos: ghostPatrolState.pos,
+        vel: ghostPatrolState.vel,
+        estimatedOrbit: ghostPatrolOrbit,
+        lastObservedSec: Math.max(0, this.gameTimeSec - 16),
         isJammed: false,
       },
       {
