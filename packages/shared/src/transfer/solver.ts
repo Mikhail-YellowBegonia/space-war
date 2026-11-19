@@ -421,14 +421,17 @@ export function solveInterceptTransfer(
     t0: number,
     dt: number,
     extra: { occludedDep?: boolean; occludedArr?: boolean; throttled?: boolean } = {},
+    precomputedDepState = orbitToState(ctx.unit.orbit, t0),
   ): EvaluatedTransfer | null => {
-    const depState = orbitToState(ctx.unit.orbit, t0);
     const arrState = orbitToState(targetOrbit, t0 + dt);
-    const lambert = solveLambertTransfer(depState.pos, arrState.pos, dt, t0);
+    const lambert = solveLambertTransfer(precomputedDepState.pos, arrState.pos, dt, t0);
     if (!lambert) {
       return null;
     }
-    const dv1 = { x: lambert.v1.x - depState.vel.x, y: lambert.v1.y - depState.vel.y };
+    const dv1 = {
+      x: lambert.v1.x - precomputedDepState.vel.x,
+      y: lambert.v1.y - precomputedDepState.vel.y,
+    };
     const dv2 = { x: arrState.vel.x - lambert.v2.x, y: arrState.vel.y - lambert.v2.y };
     return buildOptionFromCandidate(
       mode,
@@ -451,10 +454,11 @@ export function solveInterceptTransfer(
 
   for (let i = 0; i <= t0Count; i++) {
     const t0 = ctx.nowSec + (horizonSec * i) / t0Count;
+    const depState = orbitToState(ctx.unit.orbit, t0);
     let bestAtT0: { cand: EvaluatedTransfer; t0: number; dt: number } | null = null;
     for (const f of dtFactors) {
       const dt = dtH * f;
-      const cand = evaluatePair('fuel', t0, dt);
+      const cand = evaluatePair('fuel', t0, dt, {}, depState);
       if (cand && (!bestAtT0 || cand.rawDeltaV < bestAtT0.cand.rawDeltaV)) {
         bestAtT0 = { cand, t0, dt };
       }
@@ -515,9 +519,10 @@ export function solveInterceptTransfer(
 
   for (const offset of fastT0Offsets) {
     const t0 = ctx.nowSec + offset;
+    const depState = orbitToState(ctx.unit.orbit, t0);
     for (const f of fastDtFactors) {
       const dt = dtH * f;
-      const cand = evaluatePair('fast', t0, dt);
+      const cand = evaluatePair('fast', t0, dt, {}, depState);
       if (!cand) {
         continue;
       }
@@ -561,23 +566,41 @@ export function solveInterceptTransfer(
       observerResolver,
     );
 
-    let bestOccluded: EvaluatedTransfer | null = null;
+    let bestOccludedWin: { cand: EvaluatedTransfer; t0: number; dt: number; depState: ReturnType<typeof orbitToState> } | null = null;
     const stealthDtFactors = [0.6, 0.75, 0.9, 1.0, 1.12, 1.25];
     for (const t0 of occludedTimes.slice(0, 16)) {
+      const depState = orbitToState(ctx.unit.orbit, t0);
       for (const f of stealthDtFactors) {
         const dt = dtH * f;
-        const arrObservers = observerResolver(t0 + dt);
-        const arrPos = orbitToState(targetOrbit, t0 + dt).pos;
-        const arrOccluded =
-          arrObservers.length > 0 &&
-          arrObservers.every((obs) => isOccluded(arrPos, obs, bodies, t0 + dt));
-        const cand = evaluatePair('stealth', t0, dt, {
-          occludedDep: true,
-          occludedArr: arrOccluded,
-        });
-        if (cand && (!bestOccluded || cand.rawDeltaV < bestOccluded.rawDeltaV)) {
-          bestOccluded = cand;
+        const cand = evaluatePair(
+          'stealth',
+          t0,
+          dt,
+          { occludedDep: true, occludedArr: false },
+          depState,
+        );
+        if (cand && (!bestOccludedWin || cand.rawDeltaV < bestOccludedWin.cand.rawDeltaV)) {
+          bestOccludedWin = { cand, t0, dt, depState };
         }
+      }
+    }
+
+    let bestOccluded: EvaluatedTransfer | null = bestOccludedWin?.cand ?? null;
+    if (bestOccludedWin) {
+      const arrTime = bestOccludedWin.t0 + bestOccludedWin.dt;
+      const arrObservers = observerResolver(arrTime);
+      const arrPos = orbitToState(targetOrbit, arrTime).pos;
+      const arrOccluded =
+        arrObservers.length > 0 &&
+        arrObservers.every((obs) => isOccluded(arrPos, obs, bodies, arrTime));
+      if (arrOccluded) {
+        bestOccluded = evaluatePair(
+          'stealth',
+          bestOccludedWin.t0,
+          bestOccludedWin.dt,
+          { occludedDep: true, occludedArr: true },
+          bestOccludedWin.depState,
+        );
       }
     }
 
@@ -618,6 +641,17 @@ export function getInterceptTransferOptions(
   return [map.fuel, map.fast, map.stealth];
 }
 
+interface RawInsertionCandidate {
+  t0: number;
+  dt: number;
+  arrTime: number;
+  dv1: Vec2;
+  dv2: Vec2;
+  rawDeltaV: number;
+  transferOrbit: KeplerOrbit;
+  sampleMeanAnomaly0: number;
+}
+
 function solveInsertionCandidates(
   mode: TransferMode,
   ctx: TransferSolverContext,
@@ -629,17 +663,21 @@ function solveInsertionCandidates(
   const dtH = computeHohmannFlightTimeSec(ctx.unit.orbit.a, targetOrbit.a);
   const periodTarget = getOrbitalPeriodSec(targetOrbit.a);
   const targetSampleCount = 8;
+  const propOffline = (ctx.unit.subsystems?.propulsion ?? 'normal') === 'offline';
 
-  let best: EvaluatedTransfer | null = null;
-  let bestFallback: EvaluatedTransfer | null = null;
+  let best: RawInsertionCandidate | null = null;
+  let bestFallback: RawInsertionCandidate | null = null;
 
   for (const t0 of departureTimes) {
     const depState = orbitToState(ctx.unit.orbit, t0);
 
     for (let j = 0; j < targetSampleCount; j++) {
+      const sampleMeanAnomaly0 = (2 * Math.PI * j) / targetSampleCount;
       const targetSampleOrbit: KeplerOrbit = {
-        ...targetOrbit,
-        meanAnomaly0: (2 * Math.PI * j) / targetSampleCount,
+        a: targetOrbit.a,
+        e: targetOrbit.e,
+        omega: targetOrbit.omega,
+        meanAnomaly0: sampleMeanAnomaly0,
         epochSec: 0,
       };
 
@@ -652,60 +690,89 @@ function solveInsertionCandidates(
         if (!lambert) {
           continue;
         }
-        const dv1 = { x: lambert.v1.x - depState.vel.x, y: lambert.v1.y - depState.vel.y };
-        const dv2 = { x: arrState.vel.x - lambert.v2.x, y: arrState.vel.y - lambert.v2.y };
-
-        const insertedOrbit: KeplerOrbit = {
-          a: targetOrbit.a,
-          e: targetOrbit.e,
-          omega: targetOrbit.omega,
-          meanAnomaly0: normalizeAngle(
-            targetSampleOrbit.meanAnomaly0 + ((2 * Math.PI) / periodTarget) * arrTime,
-          ),
-          epochSec: arrTime,
-        };
-
-        const cand = buildOptionFromCandidate(
-          mode,
-          ctx,
-          t0,
-          dt,
-          dv1,
-          dv2,
-          lambert.orbit,
-          insertedOrbit,
-          options,
-        );
+        const dv1X = lambert.v1.x - depState.vel.x;
+        const dv1Y = lambert.v1.y - depState.vel.y;
+        const dv2X = arrState.vel.x - lambert.v2.x;
+        const dv2Y = arrState.vel.y - lambert.v2.y;
+        const rawDeltaV = Math.hypot(dv1X, dv1Y) + Math.hypot(dv2X, dv2Y);
 
         if (options.prioritizeEarliest) {
           if (
             !bestFallback ||
-            cand.option.arrivalSec < bestFallback.option.arrivalSec ||
-            (Math.abs(cand.option.arrivalSec - bestFallback.option.arrivalSec) < 1e-6 &&
-              cand.rawDeltaV < bestFallback.rawDeltaV)
+            arrTime < bestFallback.arrTime ||
+            (Math.abs(arrTime - bestFallback.arrTime) < 1e-6 && rawDeltaV < bestFallback.rawDeltaV)
           ) {
-            bestFallback = cand;
+            bestFallback = {
+              t0,
+              dt,
+              arrTime,
+              dv1: { x: dv1X, y: dv1Y },
+              dv2: { x: dv2X, y: dv2Y },
+              rawDeltaV,
+              transferOrbit: lambert.orbit,
+              sampleMeanAnomaly0,
+            };
           }
-          if (cand.option.feasible) {
-            if (
-              !best ||
-              cand.option.arrivalSec < best.option.arrivalSec ||
-              (Math.abs(cand.option.arrivalSec - best.option.arrivalSec) < 1e-6 &&
-                cand.rawDeltaV < best.rawDeltaV)
-            ) {
-              best = cand;
-            }
+          const feasible = !propOffline && rawDeltaV <= ctx.unit.deltaV + 1e-12;
+          if (
+            feasible &&
+            (!best ||
+              arrTime < best.arrTime ||
+              (Math.abs(arrTime - best.arrTime) < 1e-6 && rawDeltaV < best.rawDeltaV))
+          ) {
+            best = {
+              t0,
+              dt,
+              arrTime,
+              dv1: { x: dv1X, y: dv1Y },
+              dv2: { x: dv2X, y: dv2Y },
+              rawDeltaV,
+              transferOrbit: lambert.orbit,
+              sampleMeanAnomaly0,
+            };
           }
-        } else {
-          if (!best || cand.rawDeltaV < best.rawDeltaV) {
-            best = cand;
-          }
+        } else if (!best || rawDeltaV < best.rawDeltaV) {
+          best = {
+            t0,
+            dt,
+            arrTime,
+            dv1: { x: dv1X, y: dv1Y },
+            dv2: { x: dv2X, y: dv2Y },
+            rawDeltaV,
+            transferOrbit: lambert.orbit,
+            sampleMeanAnomaly0,
+          };
         }
       }
     }
   }
 
-  return best ?? bestFallback;
+  const chosen = best ?? bestFallback;
+  if (!chosen) {
+    return null;
+  }
+
+  const insertedOrbit: KeplerOrbit = {
+    a: targetOrbit.a,
+    e: targetOrbit.e,
+    omega: targetOrbit.omega,
+    meanAnomaly0: normalizeAngle(
+      chosen.sampleMeanAnomaly0 + ((2 * Math.PI) / periodTarget) * chosen.arrTime,
+    ),
+    epochSec: chosen.arrTime,
+  };
+
+  return buildOptionFromCandidate(
+    mode,
+    ctx,
+    chosen.t0,
+    chosen.dt,
+    chosen.dv1,
+    chosen.dv2,
+    chosen.transferOrbit,
+    insertedOrbit,
+    options,
+  );
 }
 
 /**

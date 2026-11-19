@@ -88,7 +88,9 @@ export class RoomManager {
       tickRateHz: this.tickRateHz,
       systems: this.systems,
       onTick: () => {
-        this.broadcastRoomSnapshots(roomId);
+        if (loop.isRunning()) {
+          this.broadcastRoomSnapshots(roomId);
+        }
       },
     });
 
@@ -300,6 +302,9 @@ export class RoomManager {
       return;
     }
     room.loop.stepTick();
+    if (!room.loop.isRunning()) {
+      this.broadcastRoomSnapshots(roomId);
+    }
   }
 
   public broadcastRoomSnapshots(roomId: string): void {

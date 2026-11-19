@@ -72,6 +72,7 @@ export interface FreighterFlightMeta {
   transferMode: TransferMode;
   detourWaypoint?: Vec2;
   detourReached: boolean;
+  launchedAtSec: number;
   lastGuidedSec?: number;
   penaltyApplied?: boolean;
 }
@@ -114,17 +115,43 @@ export interface WorldState {
   winner: FactionId | null;
 }
 
+interface OccluderCacheEntry {
+  tick: number;
+  gameTimeSec: number;
+  celestials: readonly CelestialBody[];
+  occluders: OccluderBody[];
+}
+
+const WORLD_OCCLUDERS_CACHE = new WeakMap<WorldState, OccluderCacheEntry>();
+
 /**
- * Evaluates all celestial body positions once at `world.gameTimeSec` so per-tick
- * occlusion and umbra checks avoid redundant Kepler solves across O(N^2) entity pairs.
+ * Evaluates all celestial body positions once per `(world.tick, world.gameTimeSec)` so
+ * per-tick occlusion and umbra checks avoid redundant Kepler solves across O(N^2) entity pairs.
  */
 export function getWorldOccluders(world: WorldState): OccluderBody[] {
-  return world.celestials.map((body) => ({
+  const cached = WORLD_OCCLUDERS_CACHE.get(world);
+  if (
+    cached &&
+    cached.tick === world.tick &&
+    cached.gameTimeSec === world.gameTimeSec &&
+    cached.celestials === world.celestials
+  ) {
+    return cached.occluders;
+  }
+
+  const occluders = world.celestials.map((body) => ({
     id: body.id,
     pos: getBodyStateAt(body, world.gameTimeSec).pos,
     occlusionRadiusAu: body.occlusionRadiusAu,
     umbraLengthAu: body.umbraLengthAu,
   }));
+  WORLD_OCCLUDERS_CACHE.set(world, {
+    tick: world.tick,
+    gameTimeSec: world.gameTimeSec,
+    celestials: world.celestials,
+    occluders,
+  });
+  return occluders;
 }
 
 function createInitialWonderSlots(): WonderSlot[] {

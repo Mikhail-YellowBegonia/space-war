@@ -10,7 +10,7 @@ import {
 } from '@space-war/shared';
 import type { CommandValidationResult } from '../engine/commandPipeline.js';
 import type { TickSystemHook } from '../engine/simulationLoop.js';
-import { createUnitEntity, type WorldState } from '../engine/worldState.js';
+import { createUnitEntity, getWorldOccluders, type WorldState } from '../engine/worldState.js';
 
 export const EW_CONSTANTS = {
   dazzleDurationSec: 4.0,
@@ -56,7 +56,7 @@ export function applyLaserDazzle(
     return false;
   }
 
-  if (isOccluded(attacker.pos, target.pos, world.celestials, world.gameTimeSec)) {
+  if (isOccluded(attacker.pos, target.pos, getWorldOccluders(world), world.gameTimeSec)) {
     return false;
   }
 

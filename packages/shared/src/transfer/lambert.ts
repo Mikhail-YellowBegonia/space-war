@@ -57,12 +57,13 @@ function evaluateLambertTof(r1: number, r2: number, A: number, z: number): numbe
   if (c <= 1e-12) {
     return null;
   }
-  const y = r1 + r2 + (A * (z * stumpffS(z) - 1)) / Math.sqrt(c);
+  const s = stumpffS(z);
+  const y = r1 + r2 + (A * (z * s - 1)) / Math.sqrt(c);
   if (!(y > 0)) {
     return null;
   }
   const x = Math.sqrt(y / c);
-  return (x * x * x * stumpffS(z) + A * Math.sqrt(y)) / SQRT_MU;
+  return (x * x * x * s + A * Math.sqrt(y)) / SQRT_MU;
 }
 
 /**
@@ -137,7 +138,6 @@ export function solveLambertTransfer(
   let lo = zLo;
   let hi = zHi;
   let z = 0.5 * (lo + hi);
-  let y = evaluateLambertY(r1, r2, A, z);
 
   for (let i = 0; i < 28; i++) {
     z = 0.5 * (lo + hi);
@@ -148,7 +148,6 @@ export function solveLambertTransfer(
     }
     const err = tof - dtSec;
     if (Math.abs(err) <= dtSec * 1e-7) {
-      y = evaluateLambertY(r1, r2, A, z);
       break;
     }
     if (err < 0) {
@@ -156,8 +155,9 @@ export function solveLambertTransfer(
     } else {
       hi = z;
     }
-    y = evaluateLambertY(r1, r2, A, z);
   }
+
+  const y = evaluateLambertY(r1, r2, A, z);
 
   if (!(y > 0)) {
     return null;
@@ -249,7 +249,7 @@ export function findOccludedDepartureTimes(
   bodies: readonly CelestialBody[],
   resolveObserversAt: (tSec: number) => readonly Vec2[],
 ): number[] {
-  const dtSample = 1.5;
+  const dtSample = 2.5;
   const steps = Math.max(8, Math.ceil(horizonSec / dtSample));
   const stepDt = horizonSec / steps;
 
@@ -267,19 +267,25 @@ export function findOccludedDepartureTimes(
     return true;
   };
 
+  const occludingBodies = bodies.filter((b) => b.occlusionRadiusAu > 0);
+  const centersBuf: Array<{ pos: Vec2; radius: number }> = occludingBodies.map((b) => ({
+    pos: { x: 0, y: 0 },
+    radius: b.occlusionRadiusAu,
+  }));
+
   const maxObserverClearance = (tSec: number): number => {
     const observers = resolveObserversAt(tSec);
     if (observers.length === 0) {
       return Number.POSITIVE_INFINITY;
     }
     const unitPos = orbitToState(unitOrbit, tSec).pos;
-    const centers = bodies.map((b) => ({
-      pos: getBodyStateAt(b, tSec).pos,
-      radius: b.occlusionRadiusAu,
-    }));
+    for (let k = 0; k < occludingBodies.length; k++) {
+      const b = occludingBodies[k]!;
+      centersBuf[k]!.pos = getBodyStateAt(b, tSec).pos;
+    }
     let worst = Number.NEGATIVE_INFINITY;
     for (const obs of observers) {
-      const c = minBodyClearanceAu(unitPos, obs, centers);
+      const c = minBodyClearanceAu(unitPos, obs, centersBuf);
       if (c > worst) {
         worst = c;
       }
@@ -304,17 +310,19 @@ export function findOccludedDepartureTimes(
 
   for (let i = 0; i <= steps; i++) {
     const t = times[i]!;
-    if (clearances[i]! < 0 && isAllOccluded(t)) {
+    const clearance = clearances[i]!;
+    if (clearance < -1e-12) {
       pushUnique(t);
+      continue;
     }
 
-    // Refine local clearance dips (< 0.08 AU) via golden-section search to catch narrow cones
+    // Refine genuine unoccluded local clearance dips (< 0.08 AU) via golden-section search
     if (
       i > 0 &&
       i < steps &&
-      clearances[i]! < 0.08 &&
-      clearances[i]! <= clearances[i - 1]! &&
-      clearances[i]! <= clearances[i + 1]!
+      clearance < 0.08 &&
+      clearance < clearances[i - 1]! &&
+      clearance <= clearances[i + 1]!
     ) {
       let a = times[i - 1]!;
       let b = times[i + 1]!;
