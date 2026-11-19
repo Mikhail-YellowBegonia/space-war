@@ -178,6 +178,7 @@ export function createThermalTickSystem(irByUnit?: Map<string, number>): TickSys
     for (const [unitId, unit] of world.units.entries()) {
       const result = stepUnitThermal(unit, dtSec, {
         usedDeltaV: usedDeltaVByUnit.get(unitId) ?? 0,
+        laserActive: world.laserActiveUnitIds.has(unitId),
       });
       world.units.set(unitId, result.unit);
       irByUnit?.set(unitId, result.irSignature);

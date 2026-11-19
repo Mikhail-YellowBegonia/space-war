@@ -36,6 +36,7 @@ export class SimulationLoop {
   public readonly dtSec: number;
   public readonly irByUnit = new Map<string, number>();
   private readonly systems: TickSystemHook[];
+  private postSensorCount = 0;
   private readonly onTick?: (world: WorldState) => void;
   private timer: ReturnType<typeof setInterval> | null = null;
 
@@ -47,10 +48,10 @@ export class SimulationLoop {
     this.tickRateHz = options.tickRateHz ?? SIM_TICK_RATE_HZ;
     this.dtSec = 1 / this.tickRateHz;
     this.systems = [
-      createThermalTickSystem(this.irByUnit),
       createEwTickSystem(),
-      createSensorTickSystem(this.irByUnit),
       ...(options.systems ?? []),
+      createThermalTickSystem(this.irByUnit),
+      createSensorTickSystem(this.irByUnit),
     ];
     this.onTick = options.onTick;
   }
@@ -59,8 +60,17 @@ export class SimulationLoop {
     return this.irByUnit.get(unitId) ?? 0;
   }
 
-  public registerSystem(hook: TickSystemHook): void {
-    this.systems.push(hook);
+  public registerSystem(
+    hook: TickSystemHook,
+    phase: 'pre_thermal' | 'post_sensor' = 'pre_thermal',
+  ): void {
+    if (phase === 'post_sensor') {
+      this.systems.push(hook);
+      this.postSensorCount += 1;
+      return;
+    }
+    const insertIdx = Math.max(0, this.systems.length - 2 - this.postSensorCount);
+    this.systems.splice(insertIdx, 0, hook);
   }
 
   public submitCommand(faction: FactionId, command: PlayerCommand): CommandValidationResult {
@@ -70,6 +80,7 @@ export class SimulationLoop {
   public stepTick(): void {
     const prevTimeSec = this.world.gameTimeSec;
     this.world.vfxEvents = [];
+    this.world.laserActiveUnitIds.clear();
 
     const usedDeltaVByUnit = new Map<string, number>();
 

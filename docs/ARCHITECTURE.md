@@ -292,3 +292,21 @@ export interface FactionSnapshot {
 4. **Git 分支与提交流程**：
    - 分支命名：`feat/sw-<编号>-<简述>`（例如 `feat/sw-04-kepler-engine`）。
    - 每次合并回 `master` 前必须保证 `pnpm -r typecheck` 与 `pnpm -r test` 全绿。
+
+---
+
+## 5. M3/M4 后端开发与双轨协作铁律
+
+进入 `SW-15`/`SW-16`（BVR 战斗）与 `SW-19`/`SW-20`（物流/奇观）后，统一遵守以下 4 条工程铁律：
+
+1. **单 Tick 阶段执行顺序铁律（`SimulationLoop.stepTick`）**：
+   - 严格保持 `1. 轨道推进与变轨 (advanceUnitOrbit) → 2. 主动武器与电子战 (EW / Munitions / Laser / CIWS，凡激光开火统一登记 world.laserActiveUnitIds.add(unitId)) → 3. 热力学与红外特征结算 (Thermal，统一消费 usedDeltaV 与 laserActiveUnitIds 并刷新 irByUnit 及过热强排) → 4. 传感器与权威迷雾裁剪 (Sensors) → 5. 后勤 / 建造 / AI`。
+   - 新增战斗/激光系统通过 `loop.registerSystem(hook, 'pre_thermal')` 挂载（默认即落在 Thermal 与 Sensors 之前）；后勤/建造/AI 系统通过 `loop.registerSystem(hook, 'post_sensor')` 挂载。
+2. **权威迷雾下的火控寻的规矩（`SW-15` / `SW-16`）**：
+   - 客户端发射指令仅允许传入 `targetTrackId`，后端统一调用 `resolveTrackTargetForFiring(world, faction, targetTrackId)` 反查目标；严禁接受原始敌方实体 ID。
+   - `bearing` 级纯方位线与 `ladar-warn-*` 被扫告警禁止发射锁定；`uncertain` 朝误差椭圆估计中心 `aimPos` 发射并依赖末端导引头开机寻的；`confirmed` / `ghost` 按当前估计轨道拦截交会。
+3. **`packages/shared` 契约冻结规矩**：
+   - 双轨并行开发 `SW-13 ~ SW-21` 期间，严禁破坏性修改 `packages/shared` 既有公开类型签名与静态表字段，确保 Dev A 与 Dev B（如 `SW-13`/`SW-14`）完全零冲突。
+4. **Git / PR 与 Issue 自动关闭规矩**：
+   - 开新特性分支前务必 `git checkout master && git pull origin master` 拉齐最新基线。
+   - PR 正文使用标准 `Closes #N`（**不要加冒号**，例如 `Closes #15`，否则 GitHub 不会自动关单）；合并前必须跑通 `pnpm -r typecheck && pnpm -r test && pnpm -r build`。
