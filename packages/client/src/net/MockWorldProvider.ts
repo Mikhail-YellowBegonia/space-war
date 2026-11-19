@@ -137,6 +137,7 @@ export class MockWorldProvider implements IWorldProvider {
   private nextMunitionSeq = 1;
   private nextBuildSeq = 1;
   private vfxEvents: VfxEvent[] = [];
+  private winner: FactionId | null = null;
   private timerId: ReturnType<typeof setInterval> | null = null;
   private scriptedRaiderOrbit: KeplerOrbit = {
     a: 1.38,
@@ -282,6 +283,14 @@ export class MockWorldProvider implements IWorldProvider {
     return () => {
       this.listeners.delete(listener);
     };
+  }
+
+  /**
+   * Concludes the mock match with a specified winner for end-of-match UI testing.
+   */
+  concludeMatch(winner: FactionId): void {
+    this.winner = winner;
+    this.emitSnapshot();
   }
 
   /**
@@ -589,7 +598,7 @@ export class MockWorldProvider implements IWorldProvider {
         from: { ...e.from },
         to: e.to ? { ...e.to } : undefined,
       })),
-      winner: null,
+      winner: this.winner,
     };
   }
 

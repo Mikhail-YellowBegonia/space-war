@@ -1,5 +1,6 @@
 import { SOLAR_SYSTEM_BODIES, type FactionId } from '@space-war/shared';
 import { getClientBootBanner } from './app.js';
+import { CicSoundEngine } from './audio/index.js';
 import { Camera2D, CameraController } from './camera/index.js';
 import {
   FireControlManager,
@@ -12,7 +13,11 @@ import {
   type IWorldProvider,
 } from './net/index.js';
 import { SolarSystemVectorRenderer } from './render/index.js';
-import { OrbitCommandHud, type HudConnectionConfig } from './ui/index.js';
+import {
+  MatchFlowController,
+  OrbitCommandHud,
+  type HudConnectionConfig,
+} from './ui/index.js';
 
 function resolveDefaultWsUrl(): string {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -23,17 +28,21 @@ function parseInitialConnectionParams(): {
   mode: 'mock' | 'ws';
   roomId: string;
   faction: FactionId;
+  skipLobby: boolean;
 } {
   const params = new URLSearchParams(window.location.search);
+  const hasModeParam = params.has('mode');
   const mode = params.get('mode') === 'ws' ? 'ws' : 'mock';
   const roomId = params.get('room')?.trim() || 'alpha-1';
   const faction: FactionId = params.get('faction') === 'mars' ? 'mars' : 'earth';
-  return { mode, roomId, faction };
+  const skipLobby = hasModeParam || params.get('autostart') === '1';
+  return { mode, roomId, faction, skipLobby };
 }
 
 function bootstrapClient(): void {
   const banner = document.getElementById('hud-boot');
   const canvas = document.getElementById('viewport');
+  const crtOverlay = document.getElementById('crt-overlay');
   const hudRoot = document.getElementById('hud-root');
 
   if (!(canvas instanceof HTMLCanvasElement)) {
@@ -52,6 +61,26 @@ function bootstrapClient(): void {
   let currentMode: 'mock' | 'ws' = initial.mode;
   let currentRoomId = initial.roomId;
   let currentFaction: FactionId = initial.faction;
+
+  const matchFlow = new MatchFlowController({
+    initialPhase: initial.skipLobby ? 'playing' : 'lobby',
+    lobby: {
+      playMode: initial.mode,
+      roomId: initial.roomId,
+      faction: initial.faction,
+    },
+    crtEnabled: true,
+    soundMuted: false,
+  });
+  const soundEngine = new CicSoundEngine({ muted: false });
+
+  const syncCrtDom = (enabled: boolean): void => {
+    canvas.classList.toggle('crt-active', enabled);
+    crtOverlay?.classList.toggle('crt-off', !enabled);
+  };
+  const unsubCrtDom = matchFlow.subscribe((flowState) => {
+    syncCrtDom(flowState.crtEnabled);
+  });
 
   let provider: IWorldProvider;
   let interaction: OrbitInteractionManager;
@@ -169,6 +198,9 @@ function bootstrapClient(): void {
         interaction,
         fireControl,
         logistics,
+        matchFlow,
+        soundEngine,
+        onLaunchSession: switchConnectionMode,
         onResetCamera: () => camera.resetOverview(),
         connection: buildConnectionConfig(),
       })
@@ -254,6 +286,8 @@ function bootstrapClient(): void {
       hud?.toggleDrawer('logistics');
     } else if (event.key === '6') {
       hud?.toggleDrawer('build');
+    } else if (event.key === 'c' || event.key === 'C') {
+      matchFlow.toggleCrt();
     } else if (event.key === 'f' || event.key === 'F') {
       void fireControl.fireAtSelectedTargets(interaction.getSelectedUnit());
     } else if (event.key === 'Enter') {
@@ -275,8 +309,11 @@ function bootstrapClient(): void {
   window.addEventListener('keydown', handleKeyDown);
   window.addEventListener('beforeunload', () => {
     unsubWsStatus?.();
+    unsubCrtDom();
     cameraController.dispose();
     hud?.dispose();
+    matchFlow.dispose();
+    soundEngine.dispose();
     logistics.dispose();
     fireControl.dispose();
     interaction.dispose();

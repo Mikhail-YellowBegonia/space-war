@@ -33,6 +33,12 @@ import {
   UnitControlPanelController,
   buildUnitControlViewModel,
 } from './UnitControlPanelController.js';
+import {
+  MatchFlowController,
+  type LobbyPlayMode,
+  type MatchFlowState,
+} from './MatchFlowController.js';
+import { CicSoundEngine } from '../audio/index.js';
 
 export interface HudConnectionConfig {
   mode: 'mock' | 'ws';
@@ -48,7 +54,10 @@ export interface OrbitCommandHudOptions {
   interaction: OrbitInteractionManager;
   fireControl?: FireControlManager;
   logistics?: LogisticsBuildController;
+  matchFlow?: MatchFlowController;
+  soundEngine?: CicSoundEngine;
   onResetCamera?: () => void;
+  onLaunchSession?: (playMode: LobbyPlayMode, roomId: string, faction: FactionId) => void;
   connection?: HudConnectionConfig;
 }
 
@@ -80,19 +89,30 @@ export class OrbitCommandHud {
   private readonly ownsFireControl: boolean;
   private logistics: LogisticsBuildController;
   private readonly ownsLogistics: boolean;
+  private readonly matchFlow: MatchFlowController;
+  private readonly ownsMatchFlow: boolean;
+  private readonly soundEngine: CicSoundEngine;
+  private readonly ownsSoundEngine: boolean;
   private readonly unitController: UnitControlPanelController;
   private readonly onResetCamera?: () => void;
+  private readonly onLaunchSession?: (
+    playMode: LobbyPlayMode,
+    roomId: string,
+    faction: FactionId,
+  ) => void;
   private connection?: HudConnectionConfig;
 
   private snapshot: FactionSnapshot;
   private interactionState: OrbitInteractionState;
   private fireState: FireControlState;
   private logisticsState: LogisticsUiState;
+  private flowState: MatchFlowState;
   private activeDrawer: ActiveDrawerTab = 'none';
   private unsubProvider: () => void;
   private unsubInteraction: () => void;
   private unsubFireControl: () => void;
   private unsubLogistics: () => void;
+  private unsubFlow: () => void;
 
   constructor(options: OrbitCommandHudOptions) {
     this.root = options.root;
@@ -102,19 +122,28 @@ export class OrbitCommandHud {
     this.fireControl = options.fireControl ?? new FireControlManager(this.provider);
     this.ownsLogistics = !options.logistics;
     this.logistics = options.logistics ?? new LogisticsBuildController(this.provider);
+    this.ownsMatchFlow = !options.matchFlow;
+    this.matchFlow =
+      options.matchFlow ?? new MatchFlowController({ initialPhase: 'playing' });
+    this.ownsSoundEngine = !options.soundEngine;
+    this.soundEngine = options.soundEngine ?? new CicSoundEngine();
     this.unitController = new UnitControlPanelController(this.provider);
     this.onResetCamera = options.onResetCamera;
+    this.onLaunchSession = options.onLaunchSession;
     this.connection = options.connection;
 
     this.snapshot = this.provider.getSnapshot();
     this.interactionState = this.interaction.getState();
     this.fireState = this.fireControl.getState();
     this.logisticsState = this.logistics.getState();
+    this.flowState = this.matchFlow.getState();
 
     this.root.addEventListener('click', this.handleClick);
     this.root.addEventListener('change', this.handleInputChange);
     this.unsubProvider = this.provider.subscribe((snap) => {
       this.snapshot = snap;
+      this.matchFlow.observeSnapshot(snap);
+      this.soundEngine.processSnapshot(snap);
       this.render();
     });
     this.unsubInteraction = this.interaction.subscribe((state) => {
@@ -127,6 +156,11 @@ export class OrbitCommandHud {
     });
     this.unsubLogistics = this.logistics.subscribe((state) => {
       this.logisticsState = state;
+      this.render();
+    });
+    this.unsubFlow = this.matchFlow.subscribe((state) => {
+      this.flowState = state;
+      this.soundEngine.setMuted(state.soundMuted);
       this.render();
     });
 
@@ -169,6 +203,8 @@ export class OrbitCommandHud {
 
     this.unsubProvider = this.provider.subscribe((snap) => {
       this.snapshot = snap;
+      this.matchFlow.observeSnapshot(snap);
+      this.soundEngine.processSnapshot(snap);
       this.render();
     });
     this.unsubInteraction = this.interaction.subscribe((state) => {
@@ -205,11 +241,18 @@ export class OrbitCommandHud {
     this.unsubInteraction();
     this.unsubFireControl();
     this.unsubLogistics();
+    this.unsubFlow();
     if (this.ownsFireControl) {
       this.fireControl.dispose();
     }
     if (this.ownsLogistics) {
       this.logistics.dispose();
+    }
+    if (this.ownsMatchFlow) {
+      this.matchFlow.dispose();
+    }
+    if (this.ownsSoundEngine) {
+      this.soundEngine.dispose();
     }
   }
 
@@ -405,6 +448,42 @@ export class OrbitCommandHud {
         }
         break;
       }
+      case 'toggle-crt': {
+        this.matchFlow.toggleCrt();
+        break;
+      }
+      case 'toggle-sfx': {
+        this.matchFlow.setSoundMuted(!this.flowState.soundMuted);
+        break;
+      }
+      case 'lobby-mode': {
+        const playMode = actionEl.dataset.playMode as LobbyPlayMode | undefined;
+        if (playMode) this.matchFlow.setLobbyConfig({ playMode });
+        break;
+      }
+      case 'lobby-faction': {
+        const faction = actionEl.dataset.faction as FactionId | undefined;
+        if (faction) this.matchFlow.setLobbyConfig({ faction });
+        break;
+      }
+      case 'lobby-launch': {
+        const roomInput = this.root.querySelector<HTMLInputElement>('#cic-lobby-room');
+        const roomId = roomInput?.value.trim() || this.flowState.lobby.roomId;
+        const cfg = this.matchFlow.startMatch({ roomId });
+        this.soundEngine.resetTracker();
+        this.onLaunchSession?.(cfg.playMode, cfg.roomId, cfg.faction);
+        break;
+      }
+      case 'return-lobby': {
+        this.matchFlow.returnToLobby();
+        break;
+      }
+      case 'play-again': {
+        const cfg = this.matchFlow.startMatch();
+        this.soundEngine.resetTracker();
+        this.onLaunchSession?.(cfg.playMode, cfg.roomId, cfg.faction);
+        break;
+      }
     }
   };
 
@@ -414,9 +493,20 @@ export class OrbitCommandHud {
     if (
       activeEl &&
       (activeEl.id === 'cic-room-id' ||
+        activeEl.id === 'cic-lobby-room' ||
         activeEl.id === 'cic-faction-select' ||
         activeEl.id === 'cic-ladar-slider')
     ) {
+      return;
+    }
+
+    if (this.flowState.phase === 'lobby') {
+      this.root.innerHTML = this.renderLobbyScreen();
+      return;
+    }
+
+    if (this.flowState.phase === 'victory') {
+      this.root.innerHTML = this.renderVictoryScreen();
       return;
     }
 
@@ -565,6 +655,9 @@ export class OrbitCommandHud {
           ${modeBtn('fire', '武器火控', '4')}
           <button class="cic-btn ${this.activeDrawer === 'logistics' ? 'active' : ''}" data-action="toggle-drawer" data-tab="logistics">[5] 物流航线</button>
           <button class="cic-btn ${this.activeDrawer === 'build' ? 'active' : ''}" data-action="toggle-drawer" data-tab="build">[6] 母港建造</button>
+          <button class="cic-btn ${this.flowState.crtEnabled ? 'active' : ''}" data-action="toggle-crt">CRT ${this.flowState.crtEnabled ? 'ON' : 'OFF'}</button>
+          <button class="cic-btn ${!this.flowState.soundMuted ? 'active' : ''}" data-action="toggle-sfx">SFX ${this.flowState.soundMuted ? 'MUTE' : 'ON'}</button>
+          <button class="cic-btn" data-action="return-lobby">大厅</button>
           <button class="cic-btn" data-action="reset-camera">[0] 复位视角</button>
         </div>
         ${modeDetailHtml}
@@ -784,5 +877,73 @@ export class OrbitCommandHud {
       ${ladarSection}
       ${droneSection}
     </aside>`;
+  }
+
+  private renderLobbyScreen(): string {
+    const { lobby, crtEnabled, soundMuted } = this.flowState;
+    return `<div class="cic-modal-backdrop cic-lobby-backdrop">
+      <div class="cic-modal cic-lobby-card">
+        <div class="lobby-header">SPACE WAR // INNER SOLAR SYSTEM CIC</div>
+        <div class="lobby-subtitle">近未来内太阳系轨道破交 RTS · 开普勒动力学 × BVR 隐身电子战</div>
+
+        <div class="lobby-section">
+          <div class="term-label">战局模式 (MODE)</div>
+          <div class="lobby-row">
+            <button class="cic-btn ${lobby.playMode === 'mock' ? 'active' : ''}" data-action="lobby-mode" data-play-mode="mock">沙盘演练 / Mock 单机</button>
+            <button class="cic-btn ${lobby.playMode === 'ws' ? 'active' : ''}" data-action="lobby-mode" data-play-mode="ws">2P 联机房间 (WebSocket)</button>
+          </div>
+        </div>
+
+        <div class="lobby-section">
+          <div class="term-label">阵营选择 (FACTION)</div>
+          <div class="lobby-row">
+            <button class="cic-btn ${lobby.faction === 'earth' ? 'active' : ''}" data-action="lobby-faction" data-faction="earth">地球联邦 (Earth · 戴森环)</button>
+            <button class="cic-btn ${lobby.faction === 'mars' ? 'active' : ''}" data-action="lobby-faction" data-faction="mars">火星共和 (Mars · 粒子加速器)</button>
+          </div>
+        </div>
+
+        ${
+          lobby.playMode === 'ws'
+            ? `<div class="lobby-section">
+                <div class="term-label">房间号 (ROOM ID)</div>
+                <input id="cic-lobby-room" class="cic-input lobby-room-input" type="text" value="${escapeHtml(lobby.roomId)}" />
+              </div>`
+            : ''
+        }
+
+        <div class="lobby-footer">
+          <div class="lobby-toggles">
+            <button class="cic-mini-btn ${crtEnabled ? 'active' : ''}" data-action="toggle-crt">CRT ${crtEnabled ? 'ON' : 'OFF'}</button>
+            <button class="cic-mini-btn ${!soundMuted ? 'active' : ''}" data-action="toggle-sfx">SFX ${soundMuted ? 'MUTE' : 'ON'}</button>
+          </div>
+          <button class="cic-exec-btn" data-action="lobby-launch">进入战区 // LAUNCH CIC</button>
+        </div>
+      </div>
+    </div>`;
+  }
+
+  private renderVictoryScreen(): string {
+    const summary = this.flowState.summary;
+    if (!summary) return '';
+    const title = summary.isVictory ? 'MISSION VICTORY // 战略胜利' : 'MISSION DEFEAT // 战局失利';
+
+    return `<div class="cic-modal-backdrop">
+      <div class="cic-modal ${summary.isVictory ? 'victory-card' : ''}">
+        <div class="modal-title ${summary.isVictory ? 'victory-title' : ''}">${title}</div>
+        <div class="victory-stats">
+          <div>胜出阵营: <b>${summary.winner.toUpperCase()}</b></div>
+          <div>对局耗时: <b>${formatDurationMmSs(summary.durationSec)}</b></div>
+          <div>己方奇观: <b>${summary.ownWonderComplete} / ${summary.ownWonderTotal}</b></div>
+          <div>敌方奇观进度: <b>${summary.enemyWonderProgress} / ${summary.ownWonderTotal}</b></div>
+          <div>存续单位: <b>${summary.survivingUnits}</b></div>
+          <div>结余资源: <b>${summary.remainingOre} Ore / ${summary.remainingPropellant} Prop</b></div>
+          <div>货运上限: <b>${summary.freighterCap}</b></div>
+        </div>
+        <div class="modal-actions">
+          <button class="cic-btn" data-action="return-lobby">返回大厅</button>
+          <button class="cic-exec-btn" data-action="play-again">再来一局</button>
+        </div>
+      </div>
+    </div>`;
   }
 }
