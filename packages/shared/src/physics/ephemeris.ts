@@ -2,7 +2,8 @@ import { TIME_SCALE_CONFIG } from '../config/index.js';
 import type { CelestialBody, KeplerOrbit, Vec2 } from '../types/index.js';
 
 const TWO_PI = 2 * Math.PI;
-const MAX_KEPLER_ECCENTRICITY = 0.92;
+export const CIRCULAR_ECCENTRICITY_EPSILON = 1e-5;
+export const MAX_KEPLER_ECCENTRICITY = 0.92;
 const MAX_KEPLER_ITERATIONS = 6;
 
 /**
@@ -107,6 +108,76 @@ export function orbitToState(orbit: KeplerOrbit, tSec: number): OrbitalState {
       x: vxOrb * cosW - vyOrb * sinW,
       y: vxOrb * sinW + vyOrb * cosW,
     },
+  };
+}
+
+/**
+ * Computes specific orbital mechanical energy (v^2 / 2 - mu / r) in AU^2 / game_s^2.
+ */
+export function getSpecificOrbitalEnergy(pos: Vec2, vel: Vec2): number {
+  const r = Math.hypot(pos.x, pos.y);
+  if (r <= 1e-12) {
+    throw new RangeError(`Orbital radius must be positive, got ${r}`);
+  }
+  const vSq = vel.x * vel.x + vel.y * vel.y;
+  return 0.5 * vSq - MU_SUN / r;
+}
+
+/**
+ * Converts heliocentric 2D Cartesian state (pos in AU, vel in AU/s) at time tSec
+ * back into planar Keplerian orbital elements.
+ * Clamps near-circular orbits (e < 1e-5) to e = 0, omega = 0 to prevent acos/NaN singularities.
+ */
+export function stateToOrbit(pos: Vec2, vel: Vec2, tSec: number): KeplerOrbit {
+  const r = Math.hypot(pos.x, pos.y);
+  if (r <= 1e-12) {
+    throw new RangeError(`Orbital radius must be positive, got ${r}`);
+  }
+
+  const vSq = vel.x * vel.x + vel.y * vel.y;
+  const h = pos.x * vel.y - pos.y * vel.x;
+  const energy = 0.5 * vSq - MU_SUN / r;
+
+  const ex = (vel.y * h) / MU_SUN - pos.x / r;
+  const ey = -(vel.x * h) / MU_SUN - pos.y / r;
+  const eRaw = Math.hypot(ex, ey);
+
+  if (eRaw < CIRCULAR_ECCENTRICITY_EPSILON) {
+    const a = energy < -1e-12 ? -MU_SUN / (2 * energy) : r;
+    return {
+      a: Math.max(1e-4, a),
+      e: 0,
+      omega: 0,
+      meanAnomaly0: normalizeAngle(Math.atan2(pos.y, pos.x)),
+      epochSec: tSec,
+    };
+  }
+
+  const e = Math.min(MAX_KEPLER_ECCENTRICITY, eRaw);
+  const p = (h * h) / MU_SUN;
+  const aRaw =
+    energy < -1e-12 && eRaw <= MAX_KEPLER_ECCENTRICITY
+      ? -MU_SUN / (2 * energy)
+      : Math.max(r / (1 + e), p / Math.max(1e-6, 1 - e * e));
+  const a = Math.max(1e-4, aRaw);
+
+  const omega = normalizeAngle(Math.atan2(ey, ex));
+  const cosW = Math.cos(omega);
+  const sinW = Math.sin(omega);
+
+  const xOrb = pos.x * cosW + pos.y * sinW;
+  const yOrb = -pos.x * sinW + pos.y * cosW;
+
+  const sqrtOneMinusESq = Math.sqrt(1 - e * e);
+  const E = Math.atan2(yOrb / sqrtOneMinusESq, xOrb + a * e);
+  const meanAnomaly0 = normalizeAngle(E - e * Math.sin(E));
+
+  return {
+    a,
+    e,
+    omega,
+    meanAnomaly0,
+    epochSec: tSec,
   };
 }
 
