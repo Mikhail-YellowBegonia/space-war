@@ -11,6 +11,12 @@ import { buildFactionSnapshot, createInitialWorldState, type WorldState } from '
 import { createThermalTickSystem } from '../systems/thermal.js';
 import { createEwTickSystem } from '../systems/ew.js';
 import { createMunitionTickSystem } from '../systems/munitions.js';
+import {
+  applyMunitionWarheadImpact,
+  createCombatTickSystem,
+  evaluateCiwsIntercept,
+  isUnitThermallyLockedOut,
+} from '../systems/combat.js';
 import { createSensorTickSystem } from '../systems/sensors.js';
 
 export interface TickSystemContext {
@@ -50,7 +56,11 @@ export class SimulationLoop {
     this.dtSec = 1 / this.tickRateHz;
     this.systems = [
       createEwTickSystem(),
-      createMunitionTickSystem(),
+      createMunitionTickSystem({
+        ciwsIntercept: evaluateCiwsIntercept,
+        warheadImpact: applyMunitionWarheadImpact,
+      }),
+      createCombatTickSystem(),
       ...(options.systems ?? []),
       createThermalTickSystem(this.irByUnit),
       createSensorTickSystem(this.irByUnit),
@@ -87,15 +97,18 @@ export class SimulationLoop {
     const usedDeltaVByUnit = new Map<string, number>();
 
     for (const [unitId, unit] of this.world.units.entries()) {
-      const result = advanceUnitOrbit(unit, prevTimeSec, this.dtSec);
-      this.world.units.set(unitId, result.unit);
+      const thermalLocked = isUnitThermallyLockedOut(unit);
+      const orbitInput = thermalLocked ? { ...unit, deltaV: 0 } : unit;
+      const result = advanceUnitOrbit(orbitInput, prevTimeSec, this.dtSec);
+      const nextUnit = thermalLocked ? { ...result.unit, deltaV: unit.deltaV } : result.unit;
+      this.world.units.set(unitId, nextUnit);
 
       if (result.usedDeltaV > 0) {
         usedDeltaVByUnit.set(unitId, result.usedDeltaV);
         const irFactor = PROPULSION_CONFIGS[unit.propulsion].irFactor;
         this.world.vfxEvents.push({
           kind: 'burn_flash',
-          from: { ...result.unit.pos },
+          from: { ...nextUnit.pos },
           intensity: Math.min(1, Math.max(0.05, irFactor / 100)),
         });
       }
