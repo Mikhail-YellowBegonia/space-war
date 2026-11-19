@@ -1,5 +1,6 @@
 import { createSpaceWarServer, DEFAULT_PORT } from './server.js';
 
+export * from './ai/index.js';
 export * from './engine/index.js';
 export * from './net/index.js';
 export * from './systems/index.js';

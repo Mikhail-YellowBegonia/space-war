@@ -15,7 +15,7 @@ import {
 } from '@space-war/shared';
 import type { CommandValidationResult } from '../engine/commandPipeline.js';
 import type { TickSystemHook } from '../engine/simulationLoop.js';
-import type { MunitionRuntimeMeta, WorldState } from '../engine/worldState.js';
+import { getWorldOccluders, type MunitionRuntimeMeta, type WorldState } from '../engine/worldState.js';
 import { SENSOR_CONSTANTS, resolveTrackTargetForFiring } from './sensors.js';
 
 export const MUNITION_CONSTANTS = {
@@ -367,13 +367,14 @@ function selectSeekerTarget(
   meta: MunitionRuntimeMeta,
   seekerRangeAu: number,
 ): { targetUnit?: UnitEntity; targetMunition?: MunitionEntity; jammedBlind: boolean } {
+  const occluders = getWorldOccluders(world);
   if (meta.targetKind === 'munition') {
     const directMun = world.munitions.get(munition.targetId);
     if (
       directMun &&
       !directMun.intercepted &&
       directMun.faction !== munition.faction &&
-      !isOccluded(munition.pos, directMun.pos, world.celestials, world.gameTimeSec)
+      !isOccluded(munition.pos, directMun.pos, occluders, world.gameTimeSec)
     ) {
       const dist = Math.hypot(directMun.pos.x - munition.pos.x, directMun.pos.y - munition.pos.y);
       if (dist <= seekerRangeAu * 1.5) {
@@ -389,7 +390,7 @@ function selectSeekerTarget(
         continue;
       }
       const d = Math.hypot(cand.pos.x - munition.pos.x, cand.pos.y - munition.pos.y);
-      if (d <= bestDist && !isOccluded(munition.pos, cand.pos, world.celestials, world.gameTimeSec)) {
+      if (d <= bestDist && !isOccluded(munition.pos, cand.pos, occluders, world.gameTimeSec)) {
         bestDist = d;
         bestMun = cand;
       }
@@ -402,7 +403,7 @@ function selectSeekerTarget(
     directUnit &&
     directUnit.hp > 0 &&
     directUnit.faction !== munition.faction &&
-    !isOccluded(munition.pos, directUnit.pos, world.celestials, world.gameTimeSec)
+    !isOccluded(munition.pos, directUnit.pos, occluders, world.gameTimeSec)
       ? directUnit
       : undefined;
 
@@ -429,7 +430,7 @@ function selectSeekerTarget(
     if (d > seekerRangeAu) {
       continue;
     }
-    if (isOccluded(munition.pos, unit.pos, world.celestials, world.gameTimeSec)) {
+    if (isOccluded(munition.pos, unit.pos, occluders, world.gameTimeSec)) {
       continue;
     }
     const cfg = UNIT_CONFIGS[unit.kind];

@@ -62,6 +62,9 @@ interface TargetSignatureView {
   opticalCrossSection: number;
   albedo: number;
   rfEmitPower: number;
+  solarBgNoise?: number;
+  inUmbra?: boolean;
+  opticalSignal?: number;
 }
 
 interface PairObservation {
@@ -114,12 +117,15 @@ function classifyUnitSuspectedKind(unit: UnitEntity): SuspectedTrackKind {
 function buildTargetView(
   entity: UnitEntity | MunitionEntity,
   irByUnit?: ReadonlyMap<string, number>,
+  occluders?: readonly OccluderBody[],
+  gameTimeSec?: number,
 ): TargetSignatureView {
+  let base: TargetSignatureView;
   if ('profileId' in entity) {
     const cfg = MUNITION_CONFIGS[entity.profileId];
     const ir = entity.coldCoast ? 0.15 : cfg.baseIr * 8;
     const rfEmitPower = !entity.coldCoast && entity.seekerMode === 'radar' ? 1.0 : 0;
-    return {
+    base = {
       id: entity.id,
       faction: entity.faction,
       pos: entity.pos,
@@ -132,36 +138,47 @@ function buildTargetView(
       albedo: 0.15,
       rfEmitPower,
     };
+  } else {
+    const cfg = UNIT_CONFIGS[entity.kind];
+    const baseIr = irByUnit?.get(entity.id) ?? computeUnitIrSignature(entity);
+    const ir =
+      entity.kind === 'drone_ew' && !entity.emconSilent
+        ? baseIr * EW_CONSTANTS.droneEwDecoyIrBoost
+        : baseIr;
+    const radarPower =
+      entity.radarActive && !entity.emconSilent && entity.subsystems.sensors !== 'offline'
+        ? cfg.sensors.radarPower
+        : 0;
+    const jammerPower =
+      entity.jammerActive && !entity.emconSilent && entity.subsystems.sensors !== 'offline'
+        ? SENSOR_CONSTANTS.jammerEsmPower
+        : 0;
+
+    base = {
+      id: entity.id,
+      faction: entity.faction,
+      pos: entity.pos,
+      vel: entity.vel,
+      orbit: entity.orbit,
+      suspectedKind: classifyUnitSuspectedKind(entity),
+      irSignature: ir,
+      rcs: cfg.rcs,
+      opticalCrossSection: cfg.opticalCrossSection,
+      albedo: cfg.albedo,
+      rfEmitPower: radarPower + jammerPower,
+    };
   }
 
-  const cfg = UNIT_CONFIGS[entity.kind];
-  const baseIr = irByUnit?.get(entity.id) ?? computeUnitIrSignature(entity);
-  const ir =
-    entity.kind === 'drone_ew' && !entity.emconSilent
-      ? baseIr * EW_CONSTANTS.droneEwDecoyIrBoost
-      : baseIr;
-  const radarPower =
-    entity.radarActive && !entity.emconSilent && entity.subsystems.sensors !== 'offline'
-      ? cfg.sensors.radarPower
-      : 0;
-  const jammerPower =
-    entity.jammerActive && !entity.emconSilent && entity.subsystems.sensors !== 'offline'
-      ? SENSOR_CONSTANTS.jammerEsmPower
-      : 0;
+  if (occluders !== undefined && gameTimeSec !== undefined) {
+    const rTargetSun = Math.max(0.15, Math.hypot(base.pos.x, base.pos.y));
+    const sunFlux = 1 / (rTargetSun * rTargetSun);
+    const inUmbra = isInUmbra(base.pos, occluders, gameTimeSec);
+    base.solarBgNoise = 1 + 0.5 * sunFlux;
+    base.inUmbra = inUmbra;
+    base.opticalSignal = inUmbra ? 0 : sunFlux * base.opticalCrossSection * base.albedo;
+  }
 
-  return {
-    id: entity.id,
-    faction: entity.faction,
-    pos: entity.pos,
-    vel: entity.vel,
-    orbit: entity.orbit,
-    suspectedKind: classifyUnitSuspectedKind(entity),
-    irSignature: ir,
-    rcs: cfg.rcs,
-    opticalCrossSection: cfg.opticalCrossSection,
-    albedo: cfg.albedo,
-    rfEmitPower: radarPower + jammerPower,
-  };
+  return base;
 }
 
 /**
@@ -216,8 +233,16 @@ export function evaluateSensorChannels(
 
   const obsCfg = UNIT_CONFIGS[observer.kind];
   const rDistSq = distanceAu * distanceAu;
-  const rTargetSun = Math.max(0.15, Math.hypot(view.pos.x, view.pos.y));
-  const solarBgNoise = 1 + 0.5 / (rTargetSun * rTargetSun);
+  let solarBgNoise = view.solarBgNoise;
+  let inUmbra = view.inUmbra;
+  let opticalSignal = view.opticalSignal;
+  if (solarBgNoise === undefined || inUmbra === undefined || opticalSignal === undefined) {
+    const rTargetSun = Math.max(0.15, Math.hypot(view.pos.x, view.pos.y));
+    const sunFlux = 1 / (rTargetSun * rTargetSun);
+    solarBgNoise = 1 + 0.5 * sunFlux;
+    inUmbra = isInUmbra(view.pos, occluders, world.gameTimeSec);
+    opticalSignal = inUmbra ? 0 : sunFlux * view.opticalCrossSection * view.albedo;
+  }
   const glareFactor = getSolarGlareFactor(observer.pos, view.pos);
 
   const blindUntil = world.sensorBlindUntilSec.get(observer.id) ?? 0;
@@ -234,19 +259,14 @@ export function evaluateSensorChannels(
     (rDistSq * solarBgNoise * SENSOR_CONSTANTS.irNorm);
 
   // 2. Passive Optical (0 inside planetary umbra, attenuated by sun flux & glare)
-  const inUmbra = isInUmbra(view.pos, occluders, world.gameTimeSec);
-  let snrOptical = 0;
-  if (!inUmbra) {
-    const sunFlux = 1 / (rTargetSun * rTargetSun);
-    const opticalSignal = sunFlux * view.opticalCrossSection * view.albedo;
-    snrOptical =
-      (opticalSignal *
+  const snrOptical = inUmbra
+    ? 0
+    : (opticalSignal *
         obsCfg.sensors.passiveOpticalSensitivity *
         sensorFactor *
         glareFactor *
         dazzleFactor) /
       (rDistSq * SENSOR_CONSTANTS.optNorm);
-  }
 
   // 3. Active Radar (1 / R^4)
   let snrRadar = 0;
@@ -513,12 +533,12 @@ export function updateFactionSensors(
   const enemyTargets: TargetSignatureView[] = [];
   for (const unit of world.units.values()) {
     if (unit.faction !== observerFaction && unit.hp > 0) {
-      enemyTargets.push(buildTargetView(unit, irByUnit));
+      enemyTargets.push(buildTargetView(unit, irByUnit, occluders, world.gameTimeSec));
     }
   }
   for (const munition of world.munitions.values()) {
     if (munition.faction !== observerFaction && !munition.intercepted) {
-      enemyTargets.push(buildTargetView(munition, irByUnit));
+      enemyTargets.push(buildTargetView(munition, irByUnit, occluders, world.gameTimeSec));
     }
   }
 
@@ -528,6 +548,51 @@ export function updateFactionSensors(
     const observations: PairObservation[] = [];
 
     for (const observer of observers) {
+      const sensorFactor = getSensorSubsystemFactor(observer.subsystems.sensors);
+      if (sensorFactor <= 0) {
+        continue;
+      }
+
+      // Fast optimistic upper-bound SNR check (glareFactor <= 1, dazzleFactor <= 1, unoccluded)
+      const dx = target.pos.x - observer.pos.x;
+      const dy = target.pos.y - observer.pos.y;
+      const distSqRaw = dx * dx + dy * dy;
+      const rDistSq = distSqRaw < 1e-8 ? 1e-8 : distSqRaw;
+      const obsCfg = UNIT_CONFIGS[observer.kind];
+      const maxIr =
+        (target.irSignature * obsCfg.sensors.passiveIrSensitivity * sensorFactor) /
+        (rDistSq * (target.solarBgNoise ?? 1) * SENSOR_CONSTANTS.irNorm);
+      const maxOpt = target.inUmbra
+        ? 0
+        : ((target.opticalSignal ?? 0) * obsCfg.sensors.passiveOpticalSensitivity * sensorFactor) /
+          (rDistSq * SENSOR_CONSTANTS.optNorm);
+      const maxEsm =
+        target.rfEmitPower > 0 && obsCfg.sensors.esmSensitivity > 0
+          ? (target.rfEmitPower * obsCfg.sensors.esmSensitivity * sensorFactor) /
+            (rDistSq * SENSOR_CONSTANTS.esmNorm)
+          : 0;
+      const effRadarRange = obsCfg.sensors.radarRangeAu * sensorFactor;
+      const maxRadar =
+        observer.radarActive &&
+        !observer.emconSilent &&
+        obsCfg.sensors.radarPower > 0 &&
+        effRadarRange > 0
+          ? ((effRadarRange * effRadarRange) / rDistSq) *
+            ((effRadarRange * effRadarRange) / rDistSq) *
+            target.rcs
+          : 0;
+      const maxLadarRange = obsCfg.sensors.ladarRangeAu * sensorFactor;
+      const ladarPossible =
+        observer.ladarTargetAngle !== undefined &&
+        !observer.emconSilent &&
+        maxLadarRange > 0 &&
+        obsCfg.sensors.ladarConeRad > 0 &&
+        distSqRaw <= maxLadarRange * maxLadarRange;
+
+      if (maxIr < 1.0 && maxOpt < 1.0 && maxEsm < 1.0 && maxRadar < 1.0 && !ladarPossible) {
+        continue;
+      }
+
       const ch = evaluateSensorChannels(observer, target, world, irByUnit, occluders);
       if (ch.occluded) {
         continue;
@@ -670,7 +735,19 @@ export function updateFactionSensors(
       memory.delete(alertId);
       continue;
     }
+    const enemyObsCfg = UNIT_CONFIGS[unit.kind].sensors;
+    const maxEnemyLadarRange =
+      enemyObsCfg.ladarRangeAu * getSensorSubsystemFactor(unit.subsystems.sensors);
+    if (maxEnemyLadarRange <= 0) {
+      continue;
+    }
+    const maxEnemyLadarRangeSq = maxEnemyLadarRange * maxEnemyLadarRange;
     for (const friendly of observers) {
+      const dx = friendly.pos.x - unit.pos.x;
+      const dy = friendly.pos.y - unit.pos.y;
+      if (dx * dx + dy * dy > maxEnemyLadarRangeSq) {
+        continue;
+      }
       const ch = evaluateSensorChannels(unit, friendly, world, irByUnit, occluders);
       if (!ch.occluded && ch.ladarHit) {
         const existingAlert = memory.get(alertId);

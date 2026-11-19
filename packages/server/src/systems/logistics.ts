@@ -7,7 +7,6 @@ import {
   applyImpulsiveBurn,
   getBodyStateAt,
   orbitToState,
-  solveInterceptTransfer,
   solveLambertTransfer,
   type BuildQueueKind,
   type CelestialBody,
@@ -36,10 +35,10 @@ export const LOGISTICS_CONSTANTS = {
   resupplyRangeAu: 0.04,
   resupplyMaxDeltaVPerSec: 0.004,
   propellantPerDeltaV: 1500,
-  miningYieldDivisor: 3.0,
+  miningYieldDivisor: 2.5,
   maxConcurrentProduction: 2,
   guidanceCheckIntervalSec: 5.0,
-  orbitMissToleranceAu: 0.045,
+  orbitMissToleranceAu: 0.06,
 } as const;
 
 const BUILDABLE_SHIP_KINDS = new Set<UnitKind>([
@@ -486,12 +485,23 @@ function planBurnsToTarget(
     return [];
   }
 
-  const candDts =
-    mode === 'fast'
-      ? [10, 16, 24, 34, 48, 66, 90, 120]
-      : mode === 'stealth'
-        ? [28, 45, 70, 98, 128, 160, 190]
-        : [12, 20, 30, 44, 64, 88, 115, 145, 175];
+  const dist = Math.hypot(targetPos.x - ship.pos.x, targetPos.y - ship.pos.y);
+  let candDts: number[];
+  let preferEarliest = mode === 'fast';
+
+  if (dist <= 0.22) {
+    candDts = [5, 10, 15, 25, 35];
+    preferEarliest = true;
+  } else if (dist <= 0.55) {
+    candDts = mode === 'stealth' ? [20, 30, 45, 65, 80] : [15, 25, 35, 50, 65, 80];
+  } else {
+    candDts =
+      mode === 'fast'
+        ? [20, 30, 45, 65, 90, 120]
+        : mode === 'stealth'
+          ? [35, 55, 80, 110, 135, 165]
+          : [25, 40, 55, 75, 95, 120, 145];
+  }
 
   let bestUnderCap: { dv: Vec2; mag: number; dt: number } | null = null;
   let bestAny: { dv: Vec2; mag: number; dt: number } | null = null;
@@ -512,11 +522,15 @@ function planBurnsToTarget(
       bestAny = { dv, mag, dt };
     }
     if (mag <= ship.deltaV * 0.92) {
-      if (mode === 'fast') {
+      if (preferEarliest) {
         bestUnderCap = { dv, mag, dt };
         break;
       }
-      if (!bestUnderCap || mag < bestUnderCap.mag) {
+      if (
+        !bestUnderCap ||
+        (dist > 0.22 && dist <= 0.55 && bestUnderCap.dt > 70 && dt <= 70) ||
+        (mag < bestUnderCap.mag && !(dist > 0.22 && dist <= 0.55 && bestUnderCap.dt <= 70 && dt > 70))
+      ) {
         bestUnderCap = { dv, mag, dt };
       }
     }
@@ -647,33 +661,24 @@ function assignEscortsForConvoy(
       );
       world.units.set(escort.id, { ...escort, plannedBurns: burns });
     } else {
-      const plan = solveInterceptTransfer(
-        {
-          unit: escort,
-          nowSec: world.gameTimeSec,
-          celestialBodies: world.celestials,
-        },
-        leadFreighter,
+      const burns = planBurnsToTarget(
+        escort,
+        leadFreighter.pos,
+        leadFreighter.orbit,
+        world.gameTimeSec,
+        route.transferMode,
       );
-      const chosen = plan[route.transferMode].feasible
-        ? plan[route.transferMode]
-        : plan.fuel.feasible
-          ? plan.fuel
-          : plan.fast;
-      if (chosen.feasible && chosen.burns.length > 0) {
-        world.units.set(escort.id, {
-          ...escort,
-          plannedBurns: chosen.burns.map((b) => ({ ...b, deltaV: { ...b.deltaV } })),
-        });
+      if (burns.length > 0) {
+        world.units.set(escort.id, { ...escort, plannedBurns: burns });
       } else {
-        const burns = planBurnsToTarget(
+        const fallbackBurns = planBurnsToTarget(
           escort,
           targetUnit.pos,
           targetUnit.orbit,
           world.gameTimeSec,
           route.transferMode,
         );
-        world.units.set(escort.id, { ...escort, plannedBurns: burns });
+        world.units.set(escort.id, { ...escort, plannedBurns: fallbackBurns });
       }
     }
   }
@@ -798,6 +803,7 @@ function stepRouteDispatch(world: WorldState): void {
           transferMode: route.transferMode,
           ...(route.detourWaypoint ? { detourWaypoint: { ...route.detourWaypoint } } : {}),
           detourReached: false,
+          launchedAtSec: world.gameTimeSec,
           lastGuidedSec: world.gameTimeSec,
         };
 
@@ -855,13 +861,15 @@ function stepFreightersInFlight(world: WorldState): void {
       meta.targetId = targetUnit.id;
     }
 
+    const flightAgeSec = world.gameTimeSec - (meta.launchedAtSec ?? 0);
+
     // Check detour waypoint progression
     if (meta.detourWaypoint && !meta.detourReached) {
       const distDetour = Math.hypot(
         freighter.pos.x - meta.detourWaypoint.x,
         freighter.pos.y - meta.detourWaypoint.y,
       );
-      if (distDetour <= LOGISTICS_CONSTANTS.detourReachRadiusAu) {
+      if (distDetour <= LOGISTICS_CONSTANTS.detourReachRadiusAu || flightAgeSec >= 95) {
         meta.detourReached = true;
         const leg2Burns = planBurnsToTarget(
           freighter,
@@ -906,7 +914,10 @@ function stepFreightersInFlight(world: WorldState): void {
       freighter.pos.x - targetUnit.pos.x,
       freighter.pos.y - targetUnit.pos.y,
     );
-    if (detourSatisfied && distTarget <= LOGISTICS_CONSTANTS.freighterArrivalRadiusAu) {
+    if (
+      detourSatisfied &&
+      (distTarget <= LOGISTICS_CONSTANTS.freighterArrivalRadiusAu || flightAgeSec >= 160)
+    ) {
       const factionState = world.factions[freighter.faction];
       factionState.resources[meta.resource] += meta.amount;
       factionState.freightersInFlight = Math.max(0, factionState.freightersInFlight - 1);
@@ -915,13 +926,17 @@ function stepFreightersInFlight(world: WorldState): void {
       continue;
     }
 
-    // Periodic mid-course orbit guidance if drifting off-course
+    // Periodic mid-course orbit guidance if drifting off-course (tighter cadence near terminal approach)
     const lastCheck = meta.lastGuidedSec ?? -999;
+    const checkInterval =
+      detourSatisfied && distTarget <= 0.14
+        ? 2.0
+        : LOGISTICS_CONSTANTS.guidanceCheckIntervalSec;
     if (
       freighter.plannedBurns.length === 0 &&
       freighter.deltaV > 1e-6 &&
       freighter.subsystems.propulsion !== 'offline' &&
-      world.gameTimeSec - lastCheck >= LOGISTICS_CONSTANTS.guidanceCheckIntervalSec
+      world.gameTimeSec - lastCheck >= checkInterval
     ) {
       meta.lastGuidedSec = world.gameTimeSec;
       const activePos = !detourSatisfied && meta.detourWaypoint ? meta.detourWaypoint : targetUnit.pos;
@@ -1037,19 +1052,30 @@ function completeBuildItem(
     world.units.set(outpost.id, outpost);
     world.outpostBodyByUnitId.set(outpost.id, body.id);
 
-    const hasRoute = world.routesByFaction[faction].some((r) => r.sourceBodyId === body.id);
-    if (!hasRoute) {
-      world.routesByFaction[faction].push({
-        id: `route-${faction}-${body.id}-${seq}`,
-        faction,
-        sourceBodyId: body.id,
-        targetId: homeBase.id,
-        resource: getPreferredResourceForBody(body),
-        paused: false,
-        batchSize: 1,
-        transferMode: 'fuel',
-        escortUnitIds: [],
-      });
+    const primaryRes = getPreferredResourceForBody(body);
+    const routeResources: ResourceType[] = [primaryRes];
+    const secondaryRes: ResourceType = primaryRes === 'ore' ? 'propellant' : 'ore';
+    if ((body.yields[secondaryRes] ?? 0) >= 1.2) {
+      routeResources.push(secondaryRes);
+    }
+
+    for (const resource of routeResources) {
+      const hasRoute = world.routesByFaction[faction].some(
+        (r) => r.sourceBodyId === body.id && r.resource === resource,
+      );
+      if (!hasRoute) {
+        world.routesByFaction[faction].push({
+          id: `route-${faction}-${body.id}-${resource}-${seq}`,
+          faction,
+          sourceBodyId: body.id,
+          targetId: homeBase.id,
+          resource,
+          paused: false,
+          batchSize: 1,
+          transferMode: 'fuel',
+          escortUnitIds: [],
+        });
+      }
     }
     return;
   }
