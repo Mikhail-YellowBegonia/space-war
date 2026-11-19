@@ -5,6 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Space War — Inner Solar System CIC</title>
     <style>
+      * {
+        box-sizing: border-box;
+      }
+
       html,
       body {
         margin: 0;
@@ -15,6 +19,7 @@
         background-color: #050a0e;
         color: #7df9ff;
         font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+        user-select: none;
       }
 
       #viewport {
@@ -25,20 +30,289 @@
 
       #hud-boot {
         position: fixed;
-        top: 12px;
-        left: 16px;
-        padding: 6px 10px;
+        top: 10px;
+        left: 14px;
+        padding: 5px 10px;
         border: 1px solid rgba(125, 249, 255, 0.35);
         background: rgba(5, 10, 14, 0.85);
-        font-size: 12px;
+        font-size: 11px;
         letter-spacing: 0.04em;
         pointer-events: none;
+        z-index: 10;
+      }
+
+      #hud-root {
+        position: fixed;
+        inset: 0;
+        pointer-events: none;
+        z-index: 20;
+      }
+
+      .cic-topbar {
+        position: fixed;
+        top: 42px;
+        left: 14px;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        max-width: min(740px, calc(100vw - 28px));
+        pointer-events: auto;
+      }
+
+      .cic-clock {
+        font-size: 11px;
+        color: #b5e7ee;
+        background: rgba(5, 10, 14, 0.85);
+        border: 1px solid rgba(125, 249, 255, 0.22);
+        padding: 4px 8px;
+        width: fit-content;
+      }
+
+      .cic-modes {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+      }
+
+      .cic-btn,
+      .cic-mini-btn,
+      .cic-chip,
+      .cic-exec-btn {
+        font-family: inherit;
+        color: #bdf8ff;
+        background: rgba(8, 17, 24, 0.9);
+        border: 1px solid rgba(125, 249, 255, 0.35);
+        cursor: pointer;
+        transition: border-color 0.12s, background-color 0.12s;
+      }
+
+      .cic-btn {
+        padding: 5px 10px;
+        font-size: 12px;
+      }
+
+      .cic-btn:hover,
+      .cic-mini-btn:hover,
+      .cic-chip:hover {
+        border-color: #7df9ff;
+        background: rgba(20, 44, 58, 0.92);
+      }
+
+      .cic-btn.active,
+      .cic-chip.active {
+        background: rgba(24, 68, 86, 0.92);
+        border-color: #7df9ff;
+        color: #ffffff;
+      }
+
+      .cic-mini-btn {
+        padding: 2px 7px;
+        font-size: 11px;
+        margin-left: 4px;
+      }
+
+      .cic-hint,
+      .cic-status {
+        font-size: 11px;
+        padding: 5px 8px;
+        background: rgba(5, 10, 14, 0.88);
+        border: 1px solid rgba(125, 249, 255, 0.25);
+        color: #c8f3f9;
+      }
+
+      .cic-status {
+        border-color: rgba(255, 209, 102, 0.5);
+        color: #ffd166;
+      }
+
+      .cic-unit-dock {
+        position: fixed;
+        left: 14px;
+        bottom: 14px;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        max-width: 520px;
+        pointer-events: auto;
+      }
+
+      .cic-chip {
+        display: flex;
+        flex-direction: column;
+        align-items: flex-start;
+        padding: 5px 9px;
+        font-size: 11px;
+      }
+
+      .chip-id {
+        font-weight: 700;
+      }
+
+      .chip-meta {
+        font-size: 10px;
+        color: #96ced6;
+      }
+
+      .cic-panel {
+        position: fixed;
+        right: 14px;
+        bottom: 48px;
+        width: min(420px, calc(100vw - 28px));
+        background: rgba(5, 11, 16, 0.93);
+        border: 1px solid rgba(125, 249, 255, 0.4);
+        padding: 10px;
+        pointer-events: auto;
+      }
+
+      .panel-title {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        font-size: 12px;
+        font-weight: 700;
+        margin-bottom: 8px;
+        color: #e2fcff;
+      }
+
+      .transfer-cards {
+        display: flex;
+        flex-direction: column;
+        gap: 7px;
+      }
+
+      .transfer-card {
+        border: 1px solid rgba(125, 249, 255, 0.28);
+        background: rgba(9, 19, 27, 0.92);
+        padding: 7px 9px;
+        cursor: pointer;
+        font-size: 11px;
+      }
+
+      .transfer-card.selected {
+        border-color: #7df9ff;
+        background: rgba(17, 44, 58, 0.95);
+      }
+
+      .transfer-card.infeasible {
+        opacity: 0.58;
+      }
+
+      .card-header {
+        display: flex;
+        justify-content: space-between;
+        font-weight: 700;
+        margin-bottom: 4px;
+      }
+
+      .card-metrics {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 4px;
+        color: #bfeef5;
+        margin-bottom: 4px;
+      }
+
+      .card-bingo {
+        font-size: 10px;
+        padding: 2px 5px;
+        border-radius: 2px;
+      }
+
+      .card-bingo.bingo-safe {
+        color: #4ade80;
+        background: rgba(74, 222, 128, 0.12);
+      }
+
+      .card-bingo.bingo-amber {
+        color: #ffb703;
+        background: rgba(255, 183, 3, 0.15);
+      }
+
+      .card-bingo.bingo-red {
+        color: #ff6b6b;
+        background: rgba(255, 77, 79, 0.18);
+      }
+
+      .card-reason {
+        margin-top: 4px;
+        font-size: 10px;
+        color: #ff8e8e;
+      }
+
+      .panel-actions {
+        margin-top: 9px;
+        display: flex;
+        justify-content: flex-end;
+      }
+
+      .cic-exec-btn {
+        padding: 6px 14px;
+        font-size: 12px;
+        font-weight: 700;
+        background: rgba(18, 66, 78, 0.95);
+        border-color: #5ce1e6;
+      }
+
+      .cic-exec-btn.warn {
+        border-color: #ffb703;
+        color: #ffd166;
+        background: rgba(74, 52, 10, 0.9);
+      }
+
+      .cic-exec-btn.danger {
+        border-color: #ff4d4f;
+        color: #ffb3b3;
+        background: rgba(82, 16, 20, 0.92);
+      }
+
+      .cic-exec-btn:disabled {
+        opacity: 0.45;
+        cursor: not-allowed;
+      }
+
+      .cic-modal-backdrop {
+        position: fixed;
+        inset: 0;
+        background: rgba(2, 6, 10, 0.72);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        pointer-events: auto;
+        z-index: 50;
+      }
+
+      .cic-modal {
+        width: min(440px, calc(100vw - 32px));
+        background: #071118;
+        border: 1px solid #ff4d4f;
+        padding: 16px;
+        color: #ffe3e3;
+      }
+
+      .modal-title {
+        font-size: 14px;
+        font-weight: 700;
+        color: #ff6b6b;
+        margin-bottom: 8px;
+      }
+
+      .modal-body {
+        font-size: 12px;
+        line-height: 1.5;
+        margin: 0 0 14px;
+      }
+
+      .modal-actions {
+        display: flex;
+        justify-content: flex-end;
+        gap: 8px;
       }
     </style>
   </head>
   <body>
     <canvas id="viewport"></canvas>
     <div id="hud-boot">INITIALIZING CIC...</div>
+    <div id="hud-root"></div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

@@ -1,4 +1,11 @@
-import type { CelestialBody, UnitEntity } from '@space-war/shared';
+import type {
+  CelestialBody,
+  KeplerOrbit,
+  SensorTrack,
+  TransferOption,
+  UnitEntity,
+  Vec2,
+} from '@space-war/shared';
 import type { Camera2D } from '../camera/index.js';
 
 /**
@@ -36,6 +43,12 @@ export interface Canvas2DContextLike {
   setLineDash(segments: number[]): void;
 }
 
+export interface TransferPreviewRenderData {
+  option: TransferOption;
+  draftOrbit?: KeplerOrbit | null;
+  apsisHandles?: { periapsis: Vec2; apoapsis: Vec2 } | null;
+}
+
 export interface RenderFrameState {
   gameTimeSec: number;
   viewportWidth: number;
@@ -43,8 +56,10 @@ export interface RenderFrameState {
   camera: Camera2D;
   bodies: readonly CelestialBody[];
   units: readonly UnitEntity[];
+  tracks?: readonly SensorTrack[];
   selectedUnitId?: string | null;
   focusedBodyId?: string | null;
+  previewTransfer?: TransferPreviewRenderData | null;
 }
 
 export interface IRenderer {

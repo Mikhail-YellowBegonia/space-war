@@ -1,14 +1,22 @@
 import {
   getBodyStateAt,
+  orbitToState,
+  type BingoWarningLevel,
   type CelestialBody,
   type FactionId,
   type KeplerOrbit,
+  type SensorTrack,
   type UnitEntity,
   type UnitKind,
   type Vec2,
 } from '@space-war/shared';
 import type { SemanticZoomTier } from '../camera/index.js';
-import type { Canvas2DContextLike, IRenderer, RenderFrameState } from './IRenderer.js';
+import type {
+  Canvas2DContextLike,
+  IRenderer,
+  RenderFrameState,
+  TransferPreviewRenderData,
+} from './IRenderer.js';
 import {
   clipSegmentToRect,
   computeScaleBarSpec,
@@ -140,6 +148,18 @@ export class SolarSystemVectorRenderer implements IRenderer {
         );
       }
       this.drawUnitSymbol(unit, frame, tier, pixelsPerAu, isSelected);
+    }
+
+    // 7b. Basic sensor track markers (detailed 4-tier graphics added in SW-13)
+    if (frame.tracks) {
+      for (const track of frame.tracks) {
+        this.drawTrackMarker(track, frame);
+      }
+    }
+
+    // 7c. Active transfer preview arcs, draft orbit, and draggable apsis handles
+    if (frame.previewTransfer) {
+      this.drawTransferPreview(frame.previewTransfer, frame);
     }
 
     // 8. Scale bar overlay
@@ -586,5 +606,143 @@ export class SolarSystemVectorRenderer implements IRenderer {
     ctx.textBaseline = 'bottom';
     ctx.fillText(spec.label, x2, y - 6);
     ctx.restore();
+  }
+
+  private drawTrackMarker(track: SensorTrack, frame: RenderFrameState): void {
+    const { ctx } = this;
+    const { camera, viewportWidth: w, viewportHeight: h } = frame;
+
+    if (track.confidence === 'bearing' && track.originPos && track.bearingRad !== undefined) {
+      const p1 = camera.worldToScreen(track.originPos);
+      const farWorld = {
+        x: track.originPos.x + Math.cos(track.bearingRad) * 6.0,
+        y: track.originPos.y + Math.sin(track.bearingRad) * 6.0,
+      };
+      const p2 = camera.worldToScreen(farWorld);
+      const clipped = clipSegmentToRect(p1, p2, 0, 0, w, h);
+      if (!clipped) return;
+
+      ctx.save();
+      ctx.strokeStyle = 'rgba(255, 138, 76, 0.35)';
+      ctx.lineWidth = 1;
+      ctx.setLineDash([6, 6]);
+      ctx.beginPath();
+      ctx.moveTo(clipped[0].x, clipped[0].y);
+      ctx.lineTo(clipped[1].x, clipped[1].y);
+      ctx.stroke();
+      ctx.restore();
+      return;
+    }
+
+    if (!track.pos) return;
+    const screenPos = camera.worldToScreen(track.pos);
+    if (screenPos.x < -32 || screenPos.x > w + 32 || screenPos.y < -32 || screenPos.y > h + 32) {
+      return;
+    }
+
+    ctx.save();
+    ctx.strokeStyle = CIC_COLORS.mars;
+    ctx.fillStyle = CIC_COLORS.mars;
+    ctx.lineWidth = 1.3;
+    ctx.setLineDash(track.confidence === 'uncertain' ? [3, 3] : []);
+    ctx.strokeRect(screenPos.x - 6, screenPos.y - 6, 12, 12);
+    ctx.font = '10px ui-monospace, SFMono-Regular, Menlo, monospace';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(track.trackId, screenPos.x + 10, screenPos.y);
+    ctx.restore();
+  }
+
+  private drawTransferPreview(
+    preview: TransferPreviewRenderData,
+    frame: RenderFrameState,
+  ): void {
+    const { ctx } = this;
+    const { camera } = frame;
+    const { option, draftOrbit, apsisHandles } = preview;
+
+    if (draftOrbit) {
+      this.drawOrbitEllipse(
+        `draft:${draftOrbit.a.toFixed(5)}:${draftOrbit.e.toFixed(5)}:${draftOrbit.omega.toFixed(5)}`,
+        draftOrbit,
+        frame,
+        'rgba(125, 249, 255, 0.55)',
+        1.4,
+        [6, 4],
+      );
+    }
+
+    const previewColor = bingoColor(option.bingoWarning);
+    for (let i = 0; i < option.previewOrbitSegments.length; i++) {
+      const seg = option.previewOrbitSegments[i]!;
+      this.drawOrbitEllipse(
+        `preview:${option.mode}:${i}:${seg.a.toFixed(5)}:${seg.e.toFixed(5)}:${seg.omega.toFixed(5)}`,
+        seg,
+        frame,
+        option.feasible ? previewColor : 'rgba(255, 92, 92, 0.45)',
+        option.feasible ? 2.1 : 1.2,
+        option.feasible ? [] : [3, 5],
+      );
+    }
+
+    // Ignition node markers along burns
+    for (let i = 0; i < option.burns.length; i++) {
+      const burn = option.burns[i]!;
+      const refOrbit = option.previewOrbitSegments[i] ?? option.previewOrbitSegments[0];
+      if (!refOrbit) continue;
+      const burnWorld = orbitToState(refOrbit, burn.executeAtSec).pos;
+      const burnScreen = camera.worldToScreen(burnWorld);
+
+      ctx.save();
+      ctx.fillStyle = burn.isOccludedStart ? '#9b8cff' : previewColor;
+      ctx.strokeStyle = '#050a0e';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.arc(burnScreen.x, burnScreen.y, 4.5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    if (apsisHandles) {
+      this.drawApsisHandle('P', apsisHandles.periapsis, camera, '#5ce1e6');
+      this.drawApsisHandle('A', apsisHandles.apoapsis, camera, '#ffd166');
+    }
+  }
+
+  private drawApsisHandle(
+    label: 'P' | 'A',
+    worldPos: Vec2,
+    camera: RenderFrameState['camera'],
+    color: string,
+  ): void {
+    const { ctx } = this;
+    const screen = camera.worldToScreen(worldPos);
+    ctx.save();
+    ctx.fillStyle = '#050a0e';
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.8;
+    ctx.beginPath();
+    ctx.arc(screen.x, screen.y, 8, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.fillStyle = color;
+    ctx.font = 'bold 10px ui-monospace, SFMono-Regular, Menlo, monospace';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(label, screen.x, screen.y + 0.5);
+    ctx.restore();
+  }
+}
+
+function bingoColor(warning: BingoWarningLevel): string {
+  switch (warning) {
+    case 'red':
+      return '#ff4d4f';
+    case 'amber':
+      return '#ffb703';
+    case 'safe':
+      return '#4ade80';
   }
 }
