@@ -6,6 +6,7 @@ import {
   type FactionId,
   type ServerMessage,
 } from '@space-war/shared';
+import { SimpleRuleAiController } from '../ai/ruleAi.js';
 import { SimulationLoop, type TickSystemHook } from '../engine/simulationLoop.js';
 import { createInitialWorldState } from '../engine/worldState.js';
 
@@ -57,6 +58,12 @@ function isValidClientMessage(value: unknown): value is ClientMessage {
   }
 }
 
+const AI_ROOM_PREFIX_RE = /^(?:ai|pve|bot|solo)/i;
+
+function isAiRoom(roomId: string): boolean {
+  return AI_ROOM_PREFIX_RE.test(roomId.trim());
+}
+
 /**
  * Manages authoritative 2-player rooms (Earth vs Mars), reconnect tokens,
  * incoming PlayerCommand validation, and per-faction FactionSnapshot broadcasts.
@@ -102,6 +109,21 @@ export class RoomManager {
         mars: null,
       },
     };
+
+    if (isAiRoom(roomId)) {
+      const aiControllers: Record<FactionId, SimpleRuleAiController> = {
+        earth: new SimpleRuleAiController('earth', { decisionIntervalSec: 3.0 }),
+        mars: new SimpleRuleAiController('mars', { decisionIntervalSec: 3.0 }),
+      };
+      loop.registerSystem(({ world }) => {
+        for (const faction of ['earth', 'mars'] as const) {
+          if (room.slots[faction] === null) {
+            aiControllers[faction].step(world);
+          }
+        }
+      }, 'post_sensor');
+    }
+
     this.rooms.set(roomId, room);
     return room;
   }

@@ -7,8 +7,6 @@ import {
   type FactionSnapshot,
   type PlayerCommand,
   type SensorTrack,
-  type UnitEntity,
-  type UnitKind,
 } from '@space-war/shared';
 import { applyPlayerCommand, type CommandValidationResult } from '../engine/commandPipeline.js';
 import type { TickSystemHook } from '../engine/simulationLoop.js';

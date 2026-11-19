@@ -11,7 +11,83 @@
 - **多通道探测、隐身与压制**：被动红外（IR）、被动光学（本影/炫光）、主动雷达（1/R⁴ vs ESM 1/R²）、发散激光主动探测（LADAR）与 4 级航迹状态；配合主动干扰与诱饵无人机进行反探测博弈。
 - **BVR 导弹/鱼雷战 + 数值化近战**：无硬性弹种隔离的统一弹药实体，可在大地图执行远程反导拦截；激光短距反导兼作主动探测；近战火炮与近防系统（CIWS）采用纯粹机制与数值结算。
 - **强制地理分层的池化物流与奇观胜利**：原料仅产于天体，高级工业仅限地球/火星母港；运力池化调度、微调航线绕路避险；通过抢建 16 槽位共轨奇观（**地球戴森环** vs **火星轨道粒子加速器**）或摧毁敌方母港取胜。
-- **复古 CIC 视觉**：CRT 扫描线微辉光 + 高对比度矢量态势图 + 像素风舰船与像素粒子 VFX。
+- **复古 CIC 视觉**：可开关 CRT 扫描线与微暗角 + 高对比度矢量态势图 + 像素风舰船、粒子 VFX 与 Web Audio 提示音。
+
+---
+
+## 本地快速启动（Local Quick Start）
+
+前置要求：`Node.js >= 20`、`pnpm >= 10`（当前使用 `pnpm@11.22.0`）。
+
+```bash
+# 1. 安装全部 Workspace 依赖
+pnpm install
+
+# 2. 启动本地开发环境（同时启动 10Hz 权威后端 3001 与 Vite 前端 5173）
+pnpm dev
+```
+
+启动后在浏览器打开 `http://localhost:5173` 进入复古 CIC 作战大厅。
+
+---
+
+## 三种本地游玩与测试模式
+
+1. **沙盘演练（Mock 单机）**
+   - 在大厅选择 **`沙盘演练 / Mock 单机`** 并选边（地球/火星），即可完全在前端纯本地演练相机缩放、进入轨道拖拽、霍曼交会预览、EMCON/电战、火控齐射与物流奇观 HUD。
+2. **单人联机对抗后端规则 AI（10Hz 权威仿真）**
+   - 在大厅选择 **`2P 联机房间 (WebSocket)`**，将房间号设为以 `ai`、`pve`、`bot` 或 `solo` 开头的名称（例如 **`ai-1`**），再点击进入战区。
+   - 未被真人玩家认领的对侧阵营将由后端 `SimpleRuleAiController` 在同一权威 10Hz 房间内自动接管（支持随时加入第二个玩家覆盖接管）。
+3. **双人实时对战（2P PvP）**
+   - 打开两个浏览器标签页（或局域网内两台设备访问同一服务），均选择 **`2P 联机房间 (WebSocket)`** 并填入相同房间号（如 `alpha-1`），分别选择 **地球联邦** 与 **火星共和** 进入战区即可实时联机对战；若中途断线，同标签页可通过重连令牌自动恢复战局。
+   - 也支持通过 URL 参数跳过大厅直连，例如 `/?mode=ws&room=ai-1&faction=earth`。
+
+---
+
+## CIC 快捷键与操控速查
+
+| 按键 / 操作 | 功能说明 |
+| :--- | :--- |
+| 滚轮 / 中键或右键拖拽 | 双精度缩放大地图（`0.05 AU` 局部交会 ↔ `7 AU` 全太阳系）与平移视角 |
+| **`Home`** / **`0`** | 重置相机至太阳系全局视角 |
+| **`1`** | 选中 / 观测模式 |
+| **`2`** | **进入轨道模式**（拖拽调节远/近日点与拱线） |
+| **`3`** | **交会拦截模式**（点选天体/站点/敌方航迹） |
+| **`4`** | **BVR 武器火控模式**（点击或 `Shift`+左键框选来袭弹药/敌舰航迹） |
+| **`5`** / **`6`** | 切换 **物流航线管理** 抽屉 / **母港建造与奇观** 抽屉 |
+| **`Enter`** / **`F`** | `Enter` 确认执行轨道转移预演；`F` 向已选目标航迹发射齐射 |
+| **`C`** / **`Esc`** | `C` 开关 CRT 后处理滤镜；`Esc` 取消 Bingo 红线确认或返回观测模式 |
+
+---
+
+## 生产构建与部署准备（Production & Deployment）
+
+服务端支持**单端口前后端一体化托管**：构建完成后，Node.js 主服务会同时提供 API 健康检查、WebSocket 联机协议，以及编译后的静态前端资源（`packages/client/dist`）。
+
+```bash
+# 1. 全仓构建 shared / server / client 产物
+pnpm build
+
+# 2. 启动单端口生产服务（默认监听 http://127.0.0.1:3001）
+pnpm start
+
+# 公网/容器部署监听全网卡与自定义端口：
+HOST=0.0.0.0 PORT=3001 pnpm start
+```
+
+- **健康检查**：`GET /health` 返回 `{"status":"ok","service":"space-war-server","protocolVersion":"0.1.0","tickRateHz":10}`。
+- **WebSocket 端点**：同域名端口的 `/ws`（例如公网反向代理 HTTPS 后客户端自动使用 `wss://<domain>/ws`；反向代理 Nginx/Caddy 需转发 `Upgrade` / `Connection: upgrade` 请求头）。
+
+---
+
+## 全仓校验命令
+
+```bash
+pnpm lint       # ESLint 全仓静态检查
+pnpm typecheck  # shared / server / client TypeScript 类型检查
+pnpm build      # 全仓产物构建
+pnpm test       # 运行 shared / server / client 全量 Vitest 自动化测试
+```
 
 ---
 
@@ -20,34 +96,23 @@
 | 文档 | 内容说明 | 链接 |
 | :--- | :--- | :--- |
 | **游戏设计文档 (GDD)** | 核心规则、审核校准说明、天体拓扑、轨道操控、探测隐身、BVR 战斗、物流经济与奇观胜利全规格 | [docs/GDD.md](./docs/GDD.md) |
-| **技术架构文档** | Monorepo 目录、前后端分离与权威迷雾协议、TS 核心数据契约、物理/传感算法及 2 人零阻塞协作规范 | [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) |
-| **模块拆解与 Issue 计划** | `M0`–`M5` 共 24 个可并行推进的工程 Issue、依赖拓扑图与 GitHub Label 体系 | [docs/ISSUES.md](./docs/ISSUES.md) |
+| **技术架构文档** | Monorepo 目录、前后端分离与权威迷雾协议、TS 核心数据契约、物理/传感算法及协作规范 | [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) |
+| **模块拆解与 Issue 计划** | `M0`–`M5` 共 24 个工程 Issue（`SW-01`–`SW-24`）、依赖拓扑与标签体系 | [docs/ISSUES.md](./docs/ISSUES.md) |
+| **V0.1 里程碑验收报告** | 全仓自动化校验结果、45 分钟对局 AI 压测节奏数据、双端重连测试与平衡初调记录 | [docs/V0.1_ACCEPTANCE.md](./docs/V0.1_ACCEPTANCE.md) |
 
 ---
 
-## 技术栈与计划目录结构
-
-- **技术栈**：TypeScript（`pnpm` Monorepo）+ Node.js / `ws` 权威模拟后端 + Vite / HTML5 Canvas2D（矢量层 + 像素精灵层 + CRT 后处理）2D Web 前端 + Vitest 单元测试。
-- **目录规划**：
+## 目录结构
 
 ```text
 space-war/
 ├── packages/
 │   ├── shared/      # 核心类型、WS 协议契约、静态配置、星历、二体轨道与转移解算纯函数
-│   ├── server/      # 10Hz 权威模拟、房间/PvP、战争迷雾裁剪、BVR 结算、物流与测试 AI
-│   └── client/      # 双精度大地图相机、矢量+像素混合渲染、Mock 沙盘、操控 HUD 与 CRT 滤镜
+│   ├── server/      # 10Hz 权威模拟、2P/AI 房间、战争迷雾裁剪、BVR 结算、物流奇观与生产静态托管
+│   └── client/      # 双精度大地图相机、矢量+像素混合渲染、Mock 沙盘、操控 HUD、音效与 CRT 滤镜
 └── docs/
     ├── GDD.md
     ├── ARCHITECTURE.md
-    └── ISSUES.md
+    ├── ISSUES.md
+    └── V0.1_ACCEPTANCE.md
 ```
-
----
-
-## 双人并行协作方式
-
-1. **M0 共建契约（1~2 天）**：双人共同完成脚手架与 `packages/shared` 数据模型、星历、协议契约冻结（`SW-01` ~ `SW-03`）。
-2. **双轨零阻塞推进（M1–M4）**：
-   - **Dev A（仿真与后端轨）**：使用 Headless Runner 与 Vitest 独立推进轨道引擎、权威迷雾、传感器/电子战、BVR 弹药/激光结算、物流与测试 AI。
-   - **Dev B（前端与交互轨）**：基于 `packages/shared` 与本地 `MockWorldProvider` 独立开发双精度大地图相机、语义缩放、轨道拖拽/交会 UI、态势感知图层、像素 VFX 与 CRT 风格。
-3. **关键汇合点**：在 `M1` 结束（`SW-09`）与 `M5` 收尾（`SW-24`）做集中联调与 45 分钟对局压测。

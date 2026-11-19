@@ -1,11 +1,27 @@
 import { randomUUID } from 'node:crypto';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { PROTOCOL_VERSION, SIM_TICK_RATE_HZ, type ServerMessage } from '@space-war/shared';
 import { WebSocket, WebSocketServer } from 'ws';
 import { RoomManager, type ClientConnection, type RoomManagerOptions } from './net/roomManager.js';
 
 export const DEFAULT_PORT = 3001;
+
+const CLIENT_DIST_DIR = fileURLToPath(new URL('../../client/dist', import.meta.url));
+
+const STATIC_MIME_TYPES: Readonly<Record<string, string>> = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'application/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.svg': 'image/svg+xml',
+  '.json': 'application/json; charset=utf-8',
+  '.png': 'image/png',
+  '.ico': 'image/x-icon',
+  '.woff2': 'font/woff2',
+};
 
 export interface HealthPayload {
   status: 'ok';
@@ -38,16 +54,69 @@ export function getHealthPayload(): HealthPayload {
   };
 }
 
+function sendStaticFile(
+  res: ServerResponse,
+  filePath: string,
+  method: string,
+): boolean {
+  try {
+    if (!statSync(filePath).isFile()) {
+      return false;
+    }
+    const ext = path.extname(filePath).toLowerCase();
+    const contentType = STATIC_MIME_TYPES[ext] ?? 'application/octet-stream';
+    const body = readFileSync(filePath);
+    res.writeHead(200, {
+      'content-type': contentType,
+      'content-length': body.byteLength,
+    });
+    res.end(method === 'HEAD' ? undefined : body);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function handleHttpRequest(req: IncomingMessage, res: ServerResponse): void {
-  const urlPath = (req.url ?? '/').split('?')[0];
-  if (req.method === 'GET' && urlPath === '/health') {
+  const method = req.method ?? 'GET';
+  const rawPath = (req.url ?? '/').split('?')[0] ?? '/';
+  if ((method === 'GET' || method === 'HEAD') && rawPath === '/health') {
+    const payload = JSON.stringify(getHealthPayload());
     res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
-    res.end(JSON.stringify(getHealthPayload()));
+    res.end(method === 'HEAD' ? undefined : payload);
     return;
   }
 
+  if ((method === 'GET' || method === 'HEAD') && rawPath !== '/ws' && existsSync(CLIENT_DIST_DIR)) {
+    let decodedPath: string;
+    try {
+      decodedPath = decodeURIComponent(rawPath);
+    } catch {
+      res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
+      res.end(method === 'HEAD' ? undefined : JSON.stringify({ error: 'Bad Request' }));
+      return;
+    }
+
+    const indexPath = path.join(CLIENT_DIST_DIR, 'index.html');
+    if (decodedPath === '/' || decodedPath === '/index.html') {
+      if (sendStaticFile(res, indexPath, method)) {
+        return;
+      }
+    } else {
+      const relPath = decodedPath.replace(/^\/+/, '');
+      const resolved = path.resolve(CLIENT_DIST_DIR, relPath);
+      const isInsideDist = resolved.startsWith(CLIENT_DIST_DIR + path.sep);
+      if (isInsideDist && sendStaticFile(res, resolved, method)) {
+        return;
+      }
+      if (!path.extname(decodedPath) && sendStaticFile(res, indexPath, method)) {
+        return;
+      }
+    }
+  }
+
   res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
-  res.end(JSON.stringify({ error: 'Not Found' }));
+  res.end(method === 'HEAD' ? undefined : JSON.stringify({ error: 'Not Found' }));
 }
 
 /**
