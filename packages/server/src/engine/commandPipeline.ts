@@ -8,6 +8,7 @@ import {
   type ResupplyPoint,
   type UnitEntity,
 } from '@space-war/shared';
+import { launchCarrierDrone } from '../systems/ew.js';
 import type { WorldState } from './worldState.js';
 
 export interface CommandValidationResult {
@@ -205,13 +206,22 @@ export function applyPlayerCommand(
       return { accepted: true };
     }
 
-    case 'launch_drone':
+    case 'launch_drone': {
+      return launchCarrierDrone(
+        world,
+        faction,
+        command.unitId,
+        command.droneKind,
+        command.targetOrbit,
+      );
+    }
+
     case 'fire_munition': {
       const { unit, error } = getOwnedUnit(world, faction, command.unitId);
       if (!unit) {
         return { accepted: false, reason: error };
       }
-      return { accepted: false, reason: `${command.type} system pending M2/M3 integration` };
+      return { accepted: false, reason: `${command.type} system pending M3 integration` };
     }
 
     case 'queue_build': {

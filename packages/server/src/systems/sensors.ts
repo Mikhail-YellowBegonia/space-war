@@ -17,6 +17,7 @@ import {
 } from '@space-war/shared';
 import type { TickSystemHook } from '../engine/simulationLoop.js';
 import type { InternalTrackRecord, WorldState } from '../engine/worldState.js';
+import { EW_CONSTANTS } from './ew.js';
 import { computeUnitIrSignature } from './thermal.js';
 
 export const SENSOR_CONSTANTS = {
@@ -133,7 +134,11 @@ function buildTargetView(
   }
 
   const cfg = UNIT_CONFIGS[entity.kind];
-  const ir = irByUnit?.get(entity.id) ?? computeUnitIrSignature(entity);
+  const baseIr = irByUnit?.get(entity.id) ?? computeUnitIrSignature(entity);
+  const ir =
+    entity.kind === 'drone_ew' && !entity.emconSilent
+      ? baseIr * EW_CONSTANTS.droneEwDecoyIrBoost
+      : baseIr;
   const radarPower =
     entity.radarActive && !entity.emconSilent && entity.subsystems.sensors !== 'offline'
       ? cfg.sensors.radarPower
@@ -289,7 +294,26 @@ export function evaluateSensorChannels(
   };
 }
 
-function isTargetJammed(world: WorldState, targetPos: Vec2, targetFaction: FactionId): boolean {
+function isPointNearSegment(point: Vec2, segA: Vec2, segB: Vec2, maxDistAu: number): boolean {
+  const dx = segB.x - segA.x;
+  const dy = segB.y - segA.y;
+  const lenSq = dx * dx + dy * dy;
+  if (lenSq <= 1e-12) {
+    return Math.hypot(point.x - segA.x, point.y - segA.y) <= maxDistAu;
+  }
+  const rawT = ((point.x - segA.x) * dx + (point.y - segA.y) * dy) / lenSq;
+  const t = Math.max(0, Math.min(1, rawT));
+  const cx = segA.x + t * dx - point.x;
+  const cy = segA.y + t * dy - point.y;
+  return cx * cx + cy * cy <= maxDistAu * maxDistAu;
+}
+
+function isTargetJammed(
+  world: WorldState,
+  targetPos: Vec2,
+  targetFaction: FactionId,
+  observerPositions: readonly Vec2[],
+): boolean {
   for (const unit of world.units.values()) {
     if (
       unit.faction !== targetFaction ||
@@ -303,6 +327,11 @@ function isTargetJammed(world: WorldState, targetPos: Vec2, targetFaction: Facti
     const dist = Math.hypot(unit.pos.x - targetPos.x, unit.pos.y - targetPos.y);
     if (dist <= SENSOR_CONSTANTS.jammerEffectRangeAu) {
       return true;
+    }
+    for (const obsPos of observerPositions) {
+      if (isPointNearSegment(unit.pos, obsPos, targetPos, 0.12)) {
+        return true;
+      }
     }
   }
   return false;
@@ -527,7 +556,12 @@ export function updateFactionSensors(
     }
 
     activeTargetIds.add(target.id);
-    const jammed = isTargetJammed(world, target.pos, target.faction);
+    const jammed = isTargetJammed(
+      world,
+      target.pos,
+      target.faction,
+      observations.map((o) => o.observer.pos),
+    );
     const nonRfTri = triangulatePassiveBearings(observations, true);
     const anyTri = nonRfTri ?? triangulatePassiveBearings(observations, false);
 
@@ -547,12 +581,16 @@ export function updateFactionSensors(
       (nonRfTri !== null && nonRfTri.maxParallaxRad >= SENSOR_CONSTANTS.confirmedParallaxAngleRad)
     ) {
       // CONFIRMED lock
+      const estPos =
+        !hasLadar && !hasRadar && !hasHighSnrPassive && nonRfTri !== null
+          ? nonRfTri.pos
+          : { ...target.pos };
       record = {
         trackId,
         targetId: target.id,
         confidence: 'confirmed',
         suspectedKind: target.suspectedKind,
-        pos: { ...target.pos },
+        pos: estPos,
         vel: { ...target.vel },
         errorRadiusMajorAu: 0.002,
         errorRadiusMinorAu: 0.002,
