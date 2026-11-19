@@ -8,6 +8,7 @@ import {
 } from '@space-war/shared';
 import { applyPlayerCommand, type CommandValidationResult } from './commandPipeline.js';
 import { buildFactionSnapshot, createInitialWorldState, type WorldState } from './worldState.js';
+import { createThermalTickSystem } from '../systems/thermal.js';
 
 export interface TickSystemContext {
   world: WorldState;
@@ -31,6 +32,7 @@ export class SimulationLoop {
   public readonly world: WorldState;
   public readonly tickRateHz: number;
   public readonly dtSec: number;
+  public readonly irByUnit = new Map<string, number>();
   private readonly systems: TickSystemHook[];
   private readonly onTick?: (world: WorldState) => void;
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -42,8 +44,12 @@ export class SimulationLoop {
     this.world = initialWorld;
     this.tickRateHz = options.tickRateHz ?? SIM_TICK_RATE_HZ;
     this.dtSec = 1 / this.tickRateHz;
-    this.systems = [...(options.systems ?? [])];
+    this.systems = [createThermalTickSystem(this.irByUnit), ...(options.systems ?? [])];
     this.onTick = options.onTick;
+  }
+
+  public getUnitIrSignature(unitId: string): number {
+    return this.irByUnit.get(unitId) ?? 0;
   }
 
   public registerSystem(hook: TickSystemHook): void {
