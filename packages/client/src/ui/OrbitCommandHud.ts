@@ -1,10 +1,16 @@
-import { UNIT_CONFIGS, type FactionSnapshot, type TransferMode, type UnitEntity } from '@space-war/shared';
+import {
+  UNIT_CONFIGS,
+  type FactionId,
+  type FactionSnapshot,
+  type TransferMode,
+  type UnitEntity,
+} from '@space-war/shared';
 import type {
   CommandInteractionMode,
   OrbitInteractionManager,
   OrbitInteractionState,
 } from '../interaction/index.js';
-import type { IWorldProvider } from '../net/index.js';
+import type { IWorldProvider, WsStatusInfo } from '../net/index.js';
 import {
   formatBingoSummary,
   formatDeltaVKmPerSec,
@@ -13,11 +19,20 @@ import {
   formatTransferModeTitle,
 } from './formatters.js';
 
+export interface HudConnectionConfig {
+  mode: 'mock' | 'ws';
+  roomId: string;
+  preferredFaction: FactionId;
+  wsStatus?: WsStatusInfo | null;
+  onSwitchMode: (mode: 'mock' | 'ws', roomId: string, preferredFaction: FactionId) => void;
+}
+
 export interface OrbitCommandHudOptions {
   root: HTMLElement;
   provider: IWorldProvider;
   interaction: OrbitInteractionManager;
   onResetCamera?: () => void;
+  connection?: HudConnectionConfig;
 }
 
 function escapeHtml(text: string): string {
@@ -40,20 +55,22 @@ function propulsionBadge(unit: UnitEntity): string {
  */
 export class OrbitCommandHud {
   private readonly root: HTMLElement;
-  private readonly provider: IWorldProvider;
-  private readonly interaction: OrbitInteractionManager;
+  private provider: IWorldProvider;
+  private interaction: OrbitInteractionManager;
   private readonly onResetCamera?: () => void;
+  private connection?: HudConnectionConfig;
 
   private snapshot: FactionSnapshot;
   private interactionState: OrbitInteractionState;
-  private readonly unsubProvider: () => void;
-  private readonly unsubInteraction: () => void;
+  private unsubProvider: () => void;
+  private unsubInteraction: () => void;
 
   constructor(options: OrbitCommandHudOptions) {
     this.root = options.root;
     this.provider = options.provider;
     this.interaction = options.interaction;
     this.onResetCamera = options.onResetCamera;
+    this.connection = options.connection;
 
     this.snapshot = this.provider.getSnapshot();
     this.interactionState = this.interaction.getState();
@@ -69,6 +86,41 @@ export class OrbitCommandHud {
     });
 
     this.render();
+  }
+
+  /**
+   * Rebinds the HUD to a newly created provider/interaction pair (e.g. Mock <-> WS switch).
+   */
+  rebind(
+    provider: IWorldProvider,
+    interaction: OrbitInteractionManager,
+    connection?: HudConnectionConfig,
+  ): void {
+    this.unsubProvider();
+    this.unsubInteraction();
+    this.provider = provider;
+    this.interaction = interaction;
+    this.connection = connection;
+
+    this.snapshot = this.provider.getSnapshot();
+    this.interactionState = this.interaction.getState();
+
+    this.unsubProvider = this.provider.subscribe((snap) => {
+      this.snapshot = snap;
+      this.render();
+    });
+    this.unsubInteraction = this.interaction.subscribe((state) => {
+      this.interactionState = state;
+      this.render();
+    });
+    this.render();
+  }
+
+  updateConnectionStatus(wsStatus: WsStatusInfo | null): void {
+    if (this.connection) {
+      this.connection = { ...this.connection, wsStatus };
+      this.render();
+    }
   }
 
   dispose(): void {
@@ -127,10 +179,27 @@ export class OrbitCommandHud {
         this.onResetCamera?.();
         break;
       }
+      case 'switch-net-mode': {
+        if (!this.connection) break;
+        const nextMode = actionEl.dataset.netMode as 'mock' | 'ws' | undefined;
+        if (!nextMode) break;
+        const roomInput = this.root.querySelector<HTMLInputElement>('#cic-room-id');
+        const factionSelect = this.root.querySelector<HTMLSelectElement>('#cic-faction-select');
+        const roomId = roomInput?.value.trim() || this.connection.roomId;
+        const faction = (factionSelect?.value as FactionId | undefined) ?? this.connection.preferredFaction;
+        this.connection.onSwitchMode(nextMode, roomId, faction);
+        break;
+      }
     }
   };
 
   private render(): void {
+    const activeEl =
+      typeof document !== 'undefined' ? (document.activeElement as HTMLElement | null) : null;
+    if (activeEl && (activeEl.id === 'cic-room-id' || activeEl.id === 'cic-faction-select')) {
+      return;
+    }
+
     const { snapshot, interactionState } = this;
     const selectedUnit =
       snapshot.ownUnits.find((u) => u.id === interactionState.selectedUnitId) ?? null;
@@ -243,9 +312,30 @@ export class OrbitCommandHud {
       ? `<div class="cic-status">${escapeHtml(interactionState.statusMessage)}</div>`
       : '';
 
+    const conn = this.connection;
+    const netLabel =
+      conn?.mode === 'ws'
+        ? `WS ${conn.wsStatus?.status.toUpperCase() ?? 'CONNECTING'} · ${snapshot.faction.toUpperCase()}${
+            conn.wsStatus?.rttMs != null ? ` · ${conn.wsStatus.rttMs}ms` : ''
+          }`
+        : `MOCK 10Hz · ${snapshot.faction.toUpperCase()}`;
+
+    const netSwitchHtml = conn
+      ? `<div class="cic-netbar">
+          <button class="cic-mini-btn ${conn.mode === 'mock' ? 'active' : ''}" data-action="switch-net-mode" data-net-mode="mock">Mock 单机</button>
+          <input id="cic-room-id" class="cic-input" type="text" value="${escapeHtml(conn.roomId)}" placeholder="Room ID" />
+          <select id="cic-faction-select" class="cic-select">
+            <option value="earth" ${conn.preferredFaction === 'earth' ? 'selected' : ''}>Earth</option>
+            <option value="mars" ${conn.preferredFaction === 'mars' ? 'selected' : ''}>Mars</option>
+          </select>
+          <button class="cic-mini-btn ${conn.mode === 'ws' ? 'active' : ''}" data-action="switch-net-mode" data-net-mode="ws">WS 联机</button>
+        </div>`
+      : '';
+
     this.root.innerHTML = `
       <div class="cic-topbar">
-        <div class="cic-clock">MOCK 10Hz · T+${formatDurationMmSs(snapshot.gameTimeSec)} · ORE ${Math.round(snapshot.resources.ore)} · PROP ${Math.round(snapshot.resources.propellant)}</div>
+        <div class="cic-clock">${escapeHtml(netLabel)} · T+${formatDurationMmSs(snapshot.gameTimeSec)} · ORE ${Math.round(snapshot.resources.ore)} · PROP ${Math.round(snapshot.resources.propellant)}</div>
+        ${netSwitchHtml}
         <div class="cic-modes">
           ${modeBtn('select', '选择', '1')}
           ${modeBtn('orbit_insertion', '进入轨道', '2')}
