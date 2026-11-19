@@ -1,4 +1,5 @@
 import {
+  UNIT_CONFIGS,
   getBodyStateAt,
   orbitToState,
   type BingoWarningLevel,
@@ -23,6 +24,14 @@ import {
   computeUmbraSectorPolygon,
   sampleOrbitPoints,
 } from './orbitGeometry.js';
+import {
+  computeConeSectorPoints,
+  computeEllipseHatchSegments,
+  computeJamNoiseArcs,
+  computeOcclusionSectorPolygon,
+  formatGhostLostTimer,
+  sampleErrorEllipsePoints,
+} from './situationalAwareness.js';
 
 const CIC_COLORS = {
   background: '#050a0e',
@@ -102,6 +111,21 @@ export class SolarSystemVectorRenderer implements IRenderer {
       bodyStates.set(body.id, getBodyStateAt(body, frame.gameTimeSec));
     }
 
+    // 3b. Shadow & Occlusion wedges rendered beneath orbit lines for clear visual layering
+    for (const body of frame.bodies) {
+      if (!body.orbit || body.umbraLengthAu <= 0) continue;
+      const state = bodyStates.get(body.id);
+      if (!state) continue;
+      this.drawUmbraSector(body, state.pos, frame);
+    }
+
+    const selectedUnit = frame.selectedUnitId
+      ? frame.units.find((u) => u.id === frame.selectedUnitId)
+      : undefined;
+    if (selectedUnit) {
+      this.drawObserverOcclusionSectors(selectedUnit.pos, frame.bodies, bodyStates, frame);
+    }
+
     // 4. Orbital ellipses (clipped in screen space after float64 transform)
     for (const body of frame.bodies) {
       if (!body.orbit) continue;
@@ -119,12 +143,9 @@ export class SolarSystemVectorRenderer implements IRenderer {
       );
     }
 
-    // 5. Anti-sunward umbra shadow sectors
-    for (const body of frame.bodies) {
-      if (!body.orbit || body.umbraLengthAu <= 0) continue;
-      const state = bodyStates.get(body.id);
-      if (!state) continue;
-      this.drawUmbraSector(body, state.pos, frame);
+    // 5. Active sensor / EW emission envelopes (LADAR scan cones & RF jammers)
+    for (const unit of frame.units) {
+      this.drawUnitSensorAndEwOverlays(unit, frame, pixelsPerAu);
     }
 
     // 6. Celestial bodies (Sun + 10 planets/asteroids)
@@ -150,10 +171,10 @@ export class SolarSystemVectorRenderer implements IRenderer {
       this.drawUnitSymbol(unit, frame, tier, pixelsPerAu, isSelected);
     }
 
-    // 7b. Basic sensor track markers (detailed 4-tier graphics added in SW-13)
+    // 7b. 4-tier situational awareness enemy sensor tracks & ECM noise rings
     if (frame.tracks) {
       for (const track of frame.tracks) {
-        this.drawTrackMarker(track, frame);
+        this.drawTrackMarker(track, frame, pixelsPerAu);
       }
     }
 
@@ -608,48 +629,390 @@ export class SolarSystemVectorRenderer implements IRenderer {
     ctx.restore();
   }
 
-  private drawTrackMarker(track: SensorTrack, frame: RenderFrameState): void {
+  private drawObserverOcclusionSectors(
+    observerPos: Vec2,
+    bodies: readonly CelestialBody[],
+    bodyStates: ReadonlyMap<string, { pos: Vec2; vel: Vec2 }>,
+    frame: RenderFrameState,
+  ): void {
     const { ctx } = this;
     const { camera, viewportWidth: w, viewportHeight: h } = frame;
 
-    if (track.confidence === 'bearing' && track.originPos && track.bearingRad !== undefined) {
+    for (const body of bodies) {
+      if (body.occlusionRadiusAu <= 0) continue;
+      const state = bodyStates.get(body.id);
+      if (!state) continue;
+
+      const dist = Math.hypot(state.pos.x - observerPos.x, state.pos.y - observerPos.y);
+      if (dist > 2.2) continue;
+
+      const poly = computeOcclusionSectorPolygon(
+        observerPos,
+        state.pos,
+        body.occlusionRadiusAu,
+        1.1,
+      );
+      if (!poly) continue;
+
+      const screenPoly = poly.map((pt) => camera.worldToScreen(pt));
+      let minX = Infinity;
+      let minY = Infinity;
+      let maxX = -Infinity;
+      let maxY = -Infinity;
+      for (const pt of screenPoly) {
+        if (pt.x < minX) minX = pt.x;
+        if (pt.y < minY) minY = pt.y;
+        if (pt.x > maxX) maxX = pt.x;
+        if (pt.y > maxY) maxY = pt.y;
+      }
+      if (maxX < -32 || minX > w + 32 || maxY < -32 || minY > h + 32) {
+        continue;
+      }
+
+      ctx.save();
+      ctx.fillStyle = 'rgba(46, 28, 72, 0.24)';
+      ctx.beginPath();
+      ctx.moveTo(screenPoly[0]!.x, screenPoly[0]!.y);
+      for (let i = 1; i < screenPoly.length; i++) {
+        ctx.lineTo(screenPoly[i]!.x, screenPoly[i]!.y);
+      }
+      ctx.closePath();
+      ctx.fill();
+
+      ctx.strokeStyle = 'rgba(155, 140, 255, 0.22)';
+      ctx.lineWidth = 1;
+      ctx.setLineDash([2, 4]);
+      ctx.beginPath();
+      ctx.moveTo(screenPoly[0]!.x, screenPoly[0]!.y);
+      ctx.lineTo(screenPoly[1]!.x, screenPoly[1]!.y);
+      ctx.moveTo(screenPoly[3]!.x, screenPoly[3]!.y);
+      ctx.lineTo(screenPoly[2]!.x, screenPoly[2]!.y);
+      ctx.stroke();
+      ctx.restore();
+    }
+  }
+
+  private drawUnitSensorAndEwOverlays(
+    unit: UnitEntity,
+    frame: RenderFrameState,
+    pixelsPerAu: number,
+  ): void {
+    const { ctx } = this;
+    const { camera } = frame;
+    const unitScreen = camera.worldToScreen(unit.pos);
+
+    // Active LADAR directional scan cone
+    if (unit.ladarTargetAngle !== undefined && !unit.emconSilent) {
+      const sensorsCfg = UNIT_CONFIGS[unit.kind].sensors;
+      if (sensorsCfg.ladarRangeAu > 0 && sensorsCfg.ladarConeRad > 0) {
+        const coneWorld = computeConeSectorPoints(
+          unit.pos,
+          unit.ladarTargetAngle,
+          sensorsCfg.ladarConeRad,
+          sensorsCfg.ladarRangeAu,
+          12,
+        );
+        const coneScreen = coneWorld.map((pt) => camera.worldToScreen(pt));
+
+        ctx.save();
+        ctx.fillStyle = 'rgba(56, 242, 178, 0.14)';
+        ctx.beginPath();
+        ctx.moveTo(coneScreen[0]!.x, coneScreen[0]!.y);
+        for (let i = 1; i < coneScreen.length; i++) {
+          ctx.lineTo(coneScreen[i]!.x, coneScreen[i]!.y);
+        }
+        ctx.closePath();
+        ctx.fill();
+
+        ctx.strokeStyle = 'rgba(56, 242, 178, 0.55)';
+        ctx.lineWidth = 1.2;
+        ctx.setLineDash([4, 3]);
+        ctx.stroke();
+
+        // Sweeping LADAR beam pulse line inside cone
+        const halfCone = sensorsCfg.ladarConeRad * 0.5;
+        const sweep = unit.ladarTargetAngle + Math.sin(frame.gameTimeSec * 4.5) * halfCone * 0.85;
+        const tipScreen = camera.worldToScreen({
+          x: unit.pos.x + Math.cos(sweep) * sensorsCfg.ladarRangeAu,
+          y: unit.pos.y + Math.sin(sweep) * sensorsCfg.ladarRangeAu,
+        });
+        ctx.setLineDash([]);
+        ctx.strokeStyle = 'rgba(130, 255, 212, 0.72)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(unitScreen.x, unitScreen.y);
+        ctx.lineTo(tipScreen.x, tipScreen.y);
+        ctx.stroke();
+        ctx.restore();
+      }
+    }
+
+    // Active RF jammer effect ring
+    if (unit.jammerActive && !unit.emconSilent) {
+      const jamRangePx = Math.max(18, 0.35 * pixelsPerAu);
+      const arcs = computeJamNoiseArcs(frame.gameTimeSec, 6);
+      ctx.save();
+      ctx.strokeStyle = 'rgba(204, 130, 255, 0.45)';
+      ctx.lineWidth = 1.2;
+      ctx.setLineDash([3, 3]);
+      for (const arc of arcs) {
+        ctx.beginPath();
+        ctx.arc(
+          unitScreen.x,
+          unitScreen.y,
+          jamRangePx * arc.radiusScale,
+          arc.startAngle,
+          arc.endAngle,
+        );
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+  }
+
+  private drawTrackMarker(
+    track: SensorTrack,
+    frame: RenderFrameState,
+    pixelsPerAu: number,
+  ): void {
+    const { ctx } = this;
+    const { camera, viewportWidth: w, viewportHeight: h, gameTimeSec } = frame;
+
+    // 1. BEARING: pulsing infinite line-of-bearing ray
+    if (track.confidence === 'bearing') {
+      if (!track.originPos || track.bearingRad === undefined) return;
       const p1 = camera.worldToScreen(track.originPos);
       const farWorld = {
-        x: track.originPos.x + Math.cos(track.bearingRad) * 6.0,
-        y: track.originPos.y + Math.sin(track.bearingRad) * 6.0,
+        x: track.originPos.x + Math.cos(track.bearingRad) * 7.0,
+        y: track.originPos.y + Math.sin(track.bearingRad) * 7.0,
       };
       const p2 = camera.worldToScreen(farWorld);
       const clipped = clipSegmentToRect(p1, p2, 0, 0, w, h);
       if (!clipped) return;
 
+      const blinkAlpha = 0.28 + 0.36 * (0.5 + 0.5 * Math.sin(gameTimeSec * 6.0));
       ctx.save();
-      ctx.strokeStyle = 'rgba(255, 138, 76, 0.35)';
-      ctx.lineWidth = 1;
-      ctx.setLineDash([6, 6]);
+      ctx.strokeStyle = CIC_COLORS.mars;
+      ctx.globalAlpha = blinkAlpha;
+      ctx.lineWidth = 1.3;
+      ctx.setLineDash([8, 6]);
       ctx.beginPath();
       ctx.moveTo(clipped[0].x, clipped[0].y);
       ctx.lineTo(clipped[1].x, clipped[1].y);
       ctx.stroke();
+
+      // Label partway along clipped ray
+      const lx = clipped[0].x + (clipped[1].x - clipped[0].x) * 0.28;
+      const ly = clipped[0].y + (clipped[1].y - clipped[0].y) * 0.28;
+      ctx.globalAlpha = Math.min(0.95, blinkAlpha + 0.25);
+      ctx.fillStyle = CIC_COLORS.mars;
+      ctx.font = '10px ui-monospace, SFMono-Regular, Menlo, monospace';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'bottom';
+      ctx.fillText(`[BRG] ${track.trackId}`, lx + 4, ly - 3);
       ctx.restore();
       return;
     }
 
-    if (!track.pos) return;
-    const screenPos = camera.worldToScreen(track.pos);
+    // 2. UNCERTAIN: semi-transparent hatched error ellipse + coarse velocity vector
+    if (track.confidence === 'uncertain') {
+      if (!track.pos) return;
+      const centerScreen = camera.worldToScreen(track.pos);
+      const majorAu = Math.max(track.errorRadiusMajorAu ?? 0.06, 12 / pixelsPerAu);
+      const minorAu = Math.max(track.errorRadiusMinorAu ?? 0.03, 7 / pixelsPerAu);
+      const angleRad = track.errorAngleRad ?? 0;
+
+      const ellipseWorld = sampleErrorEllipsePoints(track.pos, majorAu, minorAu, angleRad, 32);
+      const ellipseScreen = ellipseWorld.map((pt) => camera.worldToScreen(pt));
+      const hatchesWorld = computeEllipseHatchSegments(track.pos, majorAu, minorAu, angleRad, 7);
+
+      ctx.save();
+      ctx.fillStyle = 'rgba(255, 138, 76, 0.14)';
+      ctx.beginPath();
+      ctx.moveTo(ellipseScreen[0]!.x, ellipseScreen[0]!.y);
+      for (let i = 1; i < ellipseScreen.length; i++) {
+        ctx.lineTo(ellipseScreen[i]!.x, ellipseScreen[i]!.y);
+      }
+      ctx.closePath();
+      ctx.fill();
+
+      // Diagonal hatch lines inside ellipse
+      ctx.strokeStyle = 'rgba(255, 138, 76, 0.34)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      for (const seg of hatchesWorld) {
+        const s1 = camera.worldToScreen(seg.from);
+        const s2 = camera.worldToScreen(seg.to);
+        ctx.moveTo(s1.x, s1.y);
+        ctx.lineTo(s2.x, s2.y);
+      }
+      ctx.stroke();
+
+      // Ellipse dashed outline
+      ctx.strokeStyle = CIC_COLORS.mars;
+      ctx.lineWidth = 1.3;
+      ctx.setLineDash([4, 3]);
+      ctx.beginPath();
+      ctx.moveTo(ellipseScreen[0]!.x, ellipseScreen[0]!.y);
+      for (let i = 1; i < ellipseScreen.length; i++) {
+        ctx.lineTo(ellipseScreen[i]!.x, ellipseScreen[i]!.y);
+      }
+      ctx.closePath();
+      ctx.stroke();
+
+      // Coarse velocity arrow
+      if (track.vel) {
+        const speed = Math.hypot(track.vel.x, track.vel.y);
+        if (speed > 1e-8) {
+          ctx.setLineDash([]);
+          ctx.strokeStyle = 'rgba(255, 179, 102, 0.75)';
+          ctx.beginPath();
+          ctx.moveTo(centerScreen.x, centerScreen.y);
+          ctx.lineTo(
+            centerScreen.x + (track.vel.x / speed) * 16,
+            centerScreen.y + (track.vel.y / speed) * 16,
+          );
+          ctx.stroke();
+        }
+      }
+
+      if (track.isJammed) {
+        this.drawJammedNoiseRing(
+          centerScreen,
+          Math.max(18, majorAu * pixelsPerAu + 6),
+          gameTimeSec,
+        );
+      }
+
+      ctx.fillStyle = CIC_COLORS.mars;
+      ctx.font = '10px ui-monospace, SFMono-Regular, Menlo, monospace';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      const label = track.isJammed ? `[JAMMED] ${track.trackId}` : `[UNC] ${track.trackId}`;
+      ctx.fillText(label, centerScreen.x + 12, centerScreen.y);
+      ctx.restore();
+      return;
+    }
+
+    // 3. CONFIRMED: solid reticle, predicted orbit arc, and velocity vector
+    if (track.confidence === 'confirmed') {
+      if (!track.pos) return;
+      if (track.estimatedOrbit) {
+        this.drawOrbitEllipse(
+          `trk-conf:${track.trackId}:${track.estimatedOrbit.a.toFixed(4)}:${track.estimatedOrbit.e.toFixed(4)}:${track.estimatedOrbit.omega.toFixed(4)}`,
+          track.estimatedOrbit,
+          frame,
+          'rgba(255, 107, 107, 0.42)',
+          1.2,
+          [3, 3],
+        );
+      }
+
+      const screenPos = camera.worldToScreen(track.pos);
+      if (screenPos.x < -32 || screenPos.x > w + 32 || screenPos.y < -32 || screenPos.y > h + 32) {
+        return;
+      }
+
+      ctx.save();
+      ctx.strokeStyle = '#ff6b6b';
+      ctx.fillStyle = '#ff6b6b';
+      ctx.lineWidth = 1.6;
+      ctx.setLineDash([]);
+      // Solid diamond target lock reticle
+      ctx.beginPath();
+      ctx.moveTo(screenPos.x, screenPos.y - 8);
+      ctx.lineTo(screenPos.x + 8, screenPos.y);
+      ctx.lineTo(screenPos.x, screenPos.y + 8);
+      ctx.lineTo(screenPos.x - 8, screenPos.y);
+      ctx.closePath();
+      ctx.stroke();
+
+      if (track.vel) {
+        const speed = Math.hypot(track.vel.x, track.vel.y);
+        if (speed > 1e-8) {
+          ctx.beginPath();
+          ctx.moveTo(screenPos.x, screenPos.y);
+          ctx.lineTo(
+            screenPos.x + (track.vel.x / speed) * 18,
+            screenPos.y + (track.vel.y / speed) * 18,
+          );
+          ctx.stroke();
+        }
+      }
+
+      if (track.isJammed) {
+        this.drawJammedNoiseRing(screenPos, 18, gameTimeSec);
+      }
+
+      ctx.font = '10px ui-monospace, SFMono-Regular, Menlo, monospace';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(`[LOCK] ${track.trackId}`, screenPos.x + 11, screenPos.y);
+      ctx.restore();
+      return;
+    }
+
+    // 4. GHOST: fading dashed inertial extrapolation arc + lost-contact timer
+    const lostSec = Math.max(0, gameTimeSec - track.lastObservedSec);
+    const fadeAlpha = Math.max(0.25, 0.78 - lostSec * 0.01);
+    const ghostWorldPos = track.estimatedOrbit
+      ? orbitToState(track.estimatedOrbit, gameTimeSec).pos
+      : track.pos;
+
+    if (track.estimatedOrbit) {
+      this.drawOrbitEllipse(
+        `trk-ghost:${track.trackId}:${track.estimatedOrbit.a.toFixed(4)}:${track.estimatedOrbit.e.toFixed(4)}:${track.estimatedOrbit.omega.toFixed(4)}`,
+        track.estimatedOrbit,
+        frame,
+        `rgba(180, 165, 130, ${(fadeAlpha * 0.5).toFixed(2)})`,
+        1.1,
+        [5, 6],
+      );
+    }
+
+    if (!ghostWorldPos) return;
+    const screenPos = camera.worldToScreen(ghostWorldPos);
     if (screenPos.x < -32 || screenPos.x > w + 32 || screenPos.y < -32 || screenPos.y > h + 32) {
       return;
     }
 
     ctx.save();
-    ctx.strokeStyle = CIC_COLORS.mars;
-    ctx.fillStyle = CIC_COLORS.mars;
-    ctx.lineWidth = 1.3;
-    ctx.setLineDash(track.confidence === 'uncertain' ? [3, 3] : []);
+    ctx.strokeStyle = '#c8b48a';
+    ctx.fillStyle = '#c8b48a';
+    ctx.globalAlpha = fadeAlpha;
+    ctx.lineWidth = 1.2;
+    ctx.setLineDash([3, 3]);
     ctx.strokeRect(screenPos.x - 6, screenPos.y - 6, 12, 12);
+
     ctx.font = '10px ui-monospace, SFMono-Regular, Menlo, monospace';
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
-    ctx.fillText(track.trackId, screenPos.x + 10, screenPos.y);
+    ctx.fillText(
+      `[GHOST] ${track.trackId} · ${formatGhostLostTimer(lostSec)}`,
+      screenPos.x + 10,
+      screenPos.y,
+    );
+    ctx.restore();
+  }
+
+  private drawJammedNoiseRing(centerScreen: Vec2, radiusPx: number, gameTimeSec: number): void {
+    const { ctx } = this;
+    const arcs = computeJamNoiseArcs(gameTimeSec, 7);
+    ctx.save();
+    ctx.strokeStyle = '#d08aff';
+    ctx.lineWidth = 1.4;
+    ctx.setLineDash([2, 3]);
+    for (const arc of arcs) {
+      ctx.beginPath();
+      ctx.arc(
+        centerScreen.x,
+        centerScreen.y,
+        radiusPx * arc.radiusScale,
+        arc.startAngle,
+        arc.endAngle,
+      );
+      ctx.stroke();
+    }
     ctx.restore();
   }
 
