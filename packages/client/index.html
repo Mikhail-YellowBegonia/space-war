@@ -192,6 +192,142 @@
         pointer-events: auto;
       }
 
+      .cic-unit-terminal {
+        top: 12px;
+        bottom: auto;
+        width: min(360px, calc(100vw - 28px));
+        font-size: 11px;
+      }
+
+      .umbra-badge {
+        font-size: 10px;
+        padding: 1px 6px;
+        border: 1px solid #9b8cff;
+        color: #c8beff;
+        background: rgba(72, 56, 130, 0.35);
+      }
+
+      .term-stats {
+        display: flex;
+        justify-content: space-between;
+        color: #b4e9f0;
+        margin-bottom: 6px;
+      }
+
+      .term-subs {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px;
+        margin-bottom: 8px;
+      }
+
+      .sub-chip {
+        font-size: 10px;
+        padding: 1px 5px;
+        border: 1px solid rgba(125, 249, 255, 0.25);
+      }
+
+      .sub-damaged {
+        border-color: #ffb703;
+        color: #ffd166;
+      }
+
+      .sub-offline {
+        border-color: #ff4d4f;
+        color: #ff8e8e;
+      }
+
+      .term-heat {
+        margin-bottom: 8px;
+      }
+
+      .term-heat-head {
+        display: flex;
+        justify-content: space-between;
+        font-size: 10px;
+        margin-bottom: 3px;
+        color: #bfeef5;
+      }
+
+      .heat-track {
+        height: 7px;
+        background: rgba(255, 255, 255, 0.08);
+        border: 1px solid rgba(125, 249, 255, 0.25);
+      }
+
+      .heat-fill {
+        height: 100%;
+        transition: width 0.1s linear;
+      }
+
+      .heat-nominal {
+        background: #5ce1e6;
+      }
+
+      .heat-warm {
+        background: #ffb703;
+      }
+
+      .heat-critical {
+        background: #ff4d4f;
+      }
+
+      .term-toggles {
+        display: grid;
+        grid-template-columns: repeat(2, 1fr);
+        gap: 5px;
+        margin-bottom: 8px;
+      }
+
+      .term-toggles .cic-btn {
+        font-size: 10px;
+        padding: 4px 6px;
+      }
+
+      .cic-btn.emcon-on {
+        border-color: #9b8cff;
+        background: rgba(52, 40, 108, 0.85);
+      }
+
+      .cic-btn.ew-on {
+        border-color: #d08aff;
+        background: rgba(76, 30, 104, 0.85);
+      }
+
+      .term-row {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        margin-top: 6px;
+        padding-top: 6px;
+        border-top: 1px solid rgba(125, 249, 255, 0.15);
+      }
+
+      .term-label {
+        font-size: 10px;
+        color: #9ad7df;
+      }
+
+      .term-controls {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        flex-wrap: wrap;
+      }
+
+      .cic-slider {
+        flex: 1;
+        min-width: 90px;
+        accent-color: #38f2b2;
+      }
+
+      .term-angle {
+        min-width: 34px;
+        text-align: right;
+        color: #38f2b2;
+        font-weight: 700;
+      }
+
       .panel-title {
         display: flex;
         justify-content: space-between;

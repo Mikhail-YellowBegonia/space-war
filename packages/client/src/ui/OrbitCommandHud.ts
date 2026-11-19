@@ -18,6 +18,10 @@ import {
   formatIrRisk,
   formatTransferModeTitle,
 } from './formatters.js';
+import {
+  UnitControlPanelController,
+  buildUnitControlViewModel,
+} from './UnitControlPanelController.js';
 
 export interface HudConnectionConfig {
   mode: 'mock' | 'ws';
@@ -57,6 +61,7 @@ export class OrbitCommandHud {
   private readonly root: HTMLElement;
   private provider: IWorldProvider;
   private interaction: OrbitInteractionManager;
+  private readonly unitController: UnitControlPanelController;
   private readonly onResetCamera?: () => void;
   private connection?: HudConnectionConfig;
 
@@ -69,6 +74,7 @@ export class OrbitCommandHud {
     this.root = options.root;
     this.provider = options.provider;
     this.interaction = options.interaction;
+    this.unitController = new UnitControlPanelController(this.provider);
     this.onResetCamera = options.onResetCamera;
     this.connection = options.connection;
 
@@ -76,6 +82,7 @@ export class OrbitCommandHud {
     this.interactionState = this.interaction.getState();
 
     this.root.addEventListener('click', this.handleClick);
+    this.root.addEventListener('change', this.handleInputChange);
     this.unsubProvider = this.provider.subscribe((snap) => {
       this.snapshot = snap;
       this.render();
@@ -100,6 +107,7 @@ export class OrbitCommandHud {
     this.unsubInteraction();
     this.provider = provider;
     this.interaction = interaction;
+    this.unitController.setProvider(provider);
     this.connection = connection;
 
     this.snapshot = this.provider.getSnapshot();
@@ -125,9 +133,23 @@ export class OrbitCommandHud {
 
   dispose(): void {
     this.root.removeEventListener('click', this.handleClick);
+    this.root.removeEventListener('change', this.handleInputChange);
     this.unsubProvider();
     this.unsubInteraction();
   }
+
+  private readonly handleInputChange = (event: Event): void => {
+    const target = event.target as HTMLInputElement | null;
+    if (!target || target.id !== 'cic-ladar-slider') {
+      return;
+    }
+    const unitId = this.interactionState.selectedUnitId;
+    if (!unitId) return;
+    const deg = Number(target.value);
+    if (Number.isFinite(deg)) {
+      void this.unitController.setLadarAngleDeg(unitId, deg);
+    }
+  };
 
   private readonly handleClick = (event: MouseEvent): void => {
     const target = event.target as HTMLElement | null;
@@ -190,13 +212,59 @@ export class OrbitCommandHud {
         this.connection.onSwitchMode(nextMode, roomId, faction);
         break;
       }
+      case 'unit-emcon-silent': {
+        const unitId = this.interactionState.selectedUnitId;
+        if (unitId) void this.unitController.toggleEmconSilent(unitId);
+        break;
+      }
+      case 'unit-radiators': {
+        const unitId = this.interactionState.selectedUnitId;
+        if (unitId) void this.unitController.toggleRadiators(unitId);
+        break;
+      }
+      case 'unit-radar': {
+        const unitId = this.interactionState.selectedUnitId;
+        if (unitId) void this.unitController.toggleRadar(unitId);
+        break;
+      }
+      case 'unit-jammer': {
+        const unitId = this.interactionState.selectedUnitId;
+        if (unitId) void this.unitController.toggleJammer(unitId);
+        break;
+      }
+      case 'unit-ladar-toggle': {
+        const unitId = this.interactionState.selectedUnitId;
+        if (unitId) void this.unitController.toggleLadar(unitId);
+        break;
+      }
+      case 'unit-ladar-step': {
+        const unitId = this.interactionState.selectedUnitId;
+        const delta = Number(actionEl.dataset.delta);
+        if (unitId && Number.isFinite(delta)) {
+          void this.unitController.rotateLadarByDeg(unitId, delta);
+        }
+        break;
+      }
+      case 'unit-launch-drone': {
+        const unitId = this.interactionState.selectedUnitId;
+        const droneKind = actionEl.dataset.droneKind as 'drone_recon' | 'drone_ew' | undefined;
+        if (unitId && droneKind) {
+          void this.unitController.launchDrone(unitId, droneKind);
+        }
+        break;
+      }
     }
   };
 
   private render(): void {
     const activeEl =
       typeof document !== 'undefined' ? (document.activeElement as HTMLElement | null) : null;
-    if (activeEl && (activeEl.id === 'cic-room-id' || activeEl.id === 'cic-faction-select')) {
+    if (
+      activeEl &&
+      (activeEl.id === 'cic-room-id' ||
+        activeEl.id === 'cic-faction-select' ||
+        activeEl.id === 'cic-ladar-slider')
+    ) {
       return;
     }
 
@@ -346,8 +414,79 @@ export class OrbitCommandHud {
         ${statusLine}
       </div>
       <div class="cic-unit-dock">${unitButtonsHtml}</div>
+      ${this.renderUnitControlTerminal()}
       ${cardsHtml}
       ${modalHtml}
     `;
+  }
+
+  private renderUnitControlTerminal(): string {
+    const vm = buildUnitControlViewModel(this.snapshot, this.interactionState.selectedUnitId);
+    if (!vm) {
+      return '';
+    }
+
+    const { unit } = vm;
+    const subTag = (label: string, state: UnitEntity['subsystems']['propulsion']): string =>
+      `<span class="sub-chip sub-${state}">${label}:${state === 'normal' ? 'OK' : state === 'damaged' ? 'DMG' : 'OFF'}</span>`;
+
+    const ladarSection = vm.ladarSupported
+      ? `<div class="term-row term-ladar">
+          <div class="term-label">LADAR 扫描指向</div>
+          <div class="term-controls">
+            <button class="cic-mini-btn ${vm.ladarEnabled ? 'active' : ''}" data-action="unit-ladar-toggle">${vm.ladarEnabled ? '开启' : '关闭'}</button>
+            <button class="cic-mini-btn" data-action="unit-ladar-step" data-delta="-15">-15°</button>
+            <input id="cic-ladar-slider" class="cic-slider" type="range" min="0" max="359" value="${vm.ladarAngleDeg}" />
+            <button class="cic-mini-btn" data-action="unit-ladar-step" data-delta="15">+15°</button>
+            <span class="term-angle">${vm.ladarEnabled ? `${vm.ladarAngleDeg}°` : 'OFF'}</span>
+          </div>
+        </div>`
+      : '';
+
+    const droneSection =
+      vm.droneCapacity > 0
+        ? `<div class="term-row">
+            <div class="term-label">无人机舱 (${vm.droneCapacity})</div>
+            <div class="term-controls">
+              <button class="cic-mini-btn" data-action="unit-launch-drone" data-drone-kind="drone_recon">+ 侦察机</button>
+              <button class="cic-mini-btn" data-action="unit-launch-drone" data-drone-kind="drone_ew">+ 电战诱饵</button>
+            </div>
+          </div>`
+        : '';
+
+    return `<aside class="cic-panel cic-unit-terminal">
+      <div class="panel-title">
+        <span>单舰终端 // ${escapeHtml(unit.id)}</span>
+        ${vm.inUmbra ? '<span class="umbra-badge">UMBRA</span>' : ''}
+      </div>
+      <div class="term-stats">
+        <span>HP ${Math.round(unit.hp)}/${unit.maxHp}</span>
+        <span>Δv ${formatDeltaVKmPerSec(unit.deltaV)}</span>
+        <span>${propulsionBadge(unit)}</span>
+      </div>
+      <div class="term-subs">
+        ${subTag('PROP', unit.subsystems.propulsion)}
+        ${subTag('SENS', unit.subsystems.sensors)}
+        ${subTag('WEAP', unit.subsystems.weapons)}
+        ${subTag('THERM', unit.subsystems.thermal)}
+      </div>
+      <div class="term-heat">
+        <div class="term-heat-head">
+          <span>热沉蓄热 (HEAT SINK)</span>
+          <span>${unit.heat.toFixed(1)} / ${unit.maxHeat} (${vm.heatPercent}%)</span>
+        </div>
+        <div class="heat-track">
+          <div class="heat-fill heat-${vm.heatLevel}" style="width: ${vm.heatPercent}%"></div>
+        </div>
+      </div>
+      <div class="term-toggles">
+        <button class="cic-btn ${unit.emconSilent ? 'active emcon-on' : ''}" data-action="unit-emcon-silent">静默冷漂 ${unit.emconSilent ? 'ON' : 'OFF'}</button>
+        <button class="cic-btn ${unit.radiatorsOpen ? 'active' : ''}" data-action="unit-radiators">散热片 ${unit.radiatorsOpen ? 'OPEN' : 'SHUT'}</button>
+        <button class="cic-btn ${unit.radarActive ? 'active' : ''}" data-action="unit-radar">主动雷达 ${unit.radarActive ? 'ON' : 'OFF'}</button>
+        <button class="cic-btn ${unit.jammerActive ? 'active ew-on' : ''}" data-action="unit-jammer">电子干扰 ${unit.jammerActive ? 'ON' : 'OFF'}</button>
+      </div>
+      ${ladarSection}
+      ${droneSection}
+    </aside>`;
   }
 }
