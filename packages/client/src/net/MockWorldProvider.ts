@@ -124,6 +124,8 @@ export class MockWorldProvider implements IWorldProvider {
   private readonly units = new Map<string, UnitEntity>();
   private readonly routes: LogisticsRoute[] = [];
   private readonly ownWonder: WonderSlot[] = createInitialWonderSlots();
+  private readonly launchedDronesByCarrier = new Map<string, number>();
+  private nextDroneSeq = 1;
   private vfxEvents: VfxEvent[] = [];
   private timerId: ReturnType<typeof setInterval> | null = null;
   private scriptedRaiderOrbit: KeplerOrbit = {
@@ -251,7 +253,22 @@ export class MockWorldProvider implements IWorldProvider {
 
     for (const [id, unit] of this.units.entries()) {
       const result = advanceUnitOrbit(unit, tStart, dtSec);
-      this.units.set(id, result.unit);
+      const cfg = UNIT_CONFIGS[unit.kind];
+
+      // Lightweight thermal feedback so the heat sink bar responds in Mock mode
+      let heatDelta = cfg.baseHeatGenPerSec * dtSec;
+      if (result.activeBurn) {
+        heatDelta += result.usedDeltaV * 1800;
+      }
+      if (result.unit.ladarTargetAngle !== undefined && !result.unit.emconSilent) {
+        heatDelta += cfg.sensors.ladarHeatPerSec * dtSec;
+      }
+      if (result.unit.radiatorsOpen && !result.unit.emconSilent) {
+        heatDelta -= cfg.radiatorCoolingPerSec * dtSec;
+      }
+      const nextHeat = Math.max(0, Math.min(result.unit.maxHeat, result.unit.heat + heatDelta));
+
+      this.units.set(id, { ...result.unit, heat: nextHeat });
       if (result.activeBurn) {
         events.push({
           kind: 'burn_flash',
@@ -531,10 +548,56 @@ export class MockWorldProvider implements IWorldProvider {
         if (!unit) {
           return { accepted: false, reason: `Unknown unit: ${command.unitId}` };
         }
+        if (command.angleRad !== null && unit.subsystems.sensors === 'offline') {
+          return { accepted: false, reason: 'Sensor subsystem is offline' };
+        }
+        if (command.angleRad !== null && UNIT_CONFIGS[unit.kind].sensors.ladarRangeAu <= 0) {
+          return { accepted: false, reason: 'Unit is not equipped with LADAR' };
+        }
         this.units.set(unit.id, {
           ...unit,
-          ladarTargetAngle: command.angleRad ?? undefined,
+          ladarTargetAngle: command.angleRad === null ? undefined : command.angleRad,
         });
+        this.emitSnapshot();
+        return { accepted: true };
+      }
+
+      case 'launch_drone': {
+        const carrier = this.units.get(command.unitId);
+        if (!carrier) {
+          return { accepted: false, reason: `Unknown unit: ${command.unitId}` };
+        }
+        const capacity = UNIT_CONFIGS[carrier.kind].weapons.droneCapacity;
+        if (capacity <= 0) {
+          return { accepted: false, reason: `${carrier.kind} has no drone bay` };
+        }
+        const used = this.launchedDronesByCarrier.get(carrier.id) ?? 0;
+        if (used >= capacity) {
+          return { accepted: false, reason: 'Carrier drone bay capacity exhausted' };
+        }
+
+        const droneId = `${carrier.id}-D${this.nextDroneSeq++}`;
+        const droneOrbit: KeplerOrbit = command.targetOrbit
+          ? { ...command.targetOrbit }
+          : {
+              ...carrier.orbit,
+              a: carrier.orbit.a + 0.015,
+              meanAnomaly0: carrier.orbit.meanAnomaly0 + 0.02 * (used + 1),
+            };
+        const drone = createMockUnit({
+          id: droneId,
+          faction: this.faction,
+          kind: command.droneKind,
+          orbit: droneOrbit,
+          gameTimeSec: this.gameTimeSec,
+          emconSilent: command.droneKind === 'drone_recon',
+          radarActive: command.droneKind === 'drone_ew',
+        });
+        if (command.droneKind === 'drone_ew') {
+          drone.jammerActive = true;
+        }
+        this.units.set(droneId, drone);
+        this.launchedDronesByCarrier.set(carrier.id, used + 1);
         this.emitSnapshot();
         return { accepted: true };
       }
